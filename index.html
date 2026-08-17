@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b1118">
+  <meta name="description" content="Offline Markdown documentation viewer and editor.">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="./icons/icon-192.png">
+  <link rel="stylesheet" href="./styles.css?v=12">
+  <title>Portable Documentation</title>
+</head>
+<body>
+  <div id="app" class="app" data-mode="launch" data-sidebar="open">
+    <dialog id="launch-dialog" class="launch-dialog" aria-labelledby="launch-title">
+      <form method="dialog" class="launch-card">
+        <h1 id="launch-title">Portable Documentation</h1>
+        <p>Create a new Markdown document or open an existing file. Works offline after install.</p>
+        <div class="launch-actions">
+          <button id="launch-new" class="launch-button primary" type="button">New documentation</button>
+          <button id="launch-open" class="launch-button" type="button">Open Markdown</button>
+        </div>
+      </form>
+    </dialog>
+
+    <aside id="sidebar" class="sidebar" aria-label="Navigation">
+      <div class="sidebar-top" role="toolbar" aria-label="Document actions">
+        <button
+          id="sidebar-toggle"
+          class="icon-button sidebar-collapse"
+          type="button"
+          aria-label="Collapse sidebar"
+          title="Collapse sidebar"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="16" rx="2"/>
+            <path d="M9 4v16"/>
+            <path d="M14 9l-3 3 3 3"/>
+          </svg>
+        </button>
+        <button id="new-document-button" class="icon-button" type="button" aria-label="New" title="New">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z"/>
+            <path d="M14 2v6h6"/>
+            <path d="M12 11v6M9 14h6"/>
+          </svg>
+        </button>
+        <button id="open-document-button" class="icon-button" type="button" aria-label="Open" title="Open">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/>
+          </svg>
+        </button>
+        <button id="save-document-button" class="icon-button" type="button" aria-label="Save" title="Save">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 4v11"/>
+            <path d="M8 11l4 4 4-4"/>
+            <path d="M5 19h14"/>
+          </svg>
+        </button>
+        <button id="mode-toggle" class="icon-button" type="button" aria-label="Edit" title="Edit">
+          <svg class="icon-edit" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 20h9"/>
+            <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/>
+          </svg>
+          <svg class="icon-view" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+        </button>
+        <button id="theme-toggle" class="icon-button" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">
+          <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M21 14.5A8.5 8.5 0 1 1 9.5 3 7 7 0 0 0 21 14.5Z"/>
+          </svg>
+          <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="4"/>
+            <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>
+          </svg>
+        </button>
+      </div>
+
+      <div class="sidebar-body">
+        <div id="sidebar-brand" class="sidebar-brand">Documentation</div>
+        <div class="sidebar-label">Contents</div>
+        <nav id="toc" class="toc" aria-label="Table of contents"></nav>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header id="helper-banner" class="helper-banner" hidden aria-label="Markdown helpers">
+        <div class="helper-row">
+          <button class="helper-button" type="button" data-insert="title" title="Title">Title</button>
+          <button class="helper-button" type="button" data-insert="subtitle" title="Subtitle">Subtitle</button>
+          <button class="helper-button" type="button" data-insert="code" title="Code block">Code block</button>
+          <button class="helper-button" type="button" data-insert="diagram" title="SVG diagram">SVG diagram</button>
+          <button class="helper-button" type="button" data-insert="block" title="Block diagram">Block</button>
+          <button class="helper-button" type="button" data-insert="asm" title="ASM chart">ASM</button>
+          <button class="helper-button" type="button" data-insert="circuit" title="Circuit diagram">Circuit</button>
+          <button class="helper-button" type="button" data-insert="signal" title="Variable name (Ctrl+B)">Variable name</button>
+          <div class="table-helper">
+            <button id="table-helper-button" class="helper-button" type="button" aria-haspopup="true" aria-expanded="false" title="Table">Table</button>
+            <div id="table-picker" class="table-picker" hidden>
+              <div id="table-grid" class="table-grid" role="grid" aria-label="Choose table size"></div>
+              <div id="table-size-label" class="table-size-label">1 × 1</div>
+            </div>
+          </div>
+          <span id="doc-status" class="doc-status" aria-live="polite"></span>
+        </div>
+      </header>
+
+      <main id="view-shell" class="view-shell">
+        <article id="document-view" class="document-view markdown-body"></article>
+      </main>
+
+      <section id="editor-shell" class="editor-shell" hidden>
+        <div class="editor-workspace">
+          <div class="editor-column">
+            <div class="editor-column-heading">
+              <div class="editor-column-title">Markdown source</div>
+              <div class="editor-find-actions" role="toolbar" aria-label="Editor search">
+                <button
+                  id="editor-find-button"
+                  class="editor-icon-button"
+                  type="button"
+                  aria-label="Find"
+                  title="Find (Ctrl+F)"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="11" cy="11" r="6"/>
+                    <path d="m16 16 4 4"/>
+                  </svg>
+                </button>
+                <button
+                  id="editor-replace-button"
+                  class="editor-icon-button"
+                  type="button"
+                  aria-label="Find and replace"
+                  title="Find and replace (Ctrl+H)"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="9" cy="9" r="5"/>
+                    <path d="m13 13 3 3"/>
+                    <path d="M14 20h6v-6"/>
+                    <path d="m20 20-4-4"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <div
+              id="source-editor"
+              class="monaco-host"
+              role="textbox"
+              aria-label="Markdown documentation source"
+            ></div>
+          </div>
+          <div class="editor-column">
+            <div class="editor-column-title">Preview</div>
+            <article id="editor-preview" class="editor-preview markdown-body"></article>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <input id="markdown-file-input" type="file" accept=".md,.markdown,text/markdown" hidden>
+
+  <script src="./vendor/marked.umd.js"></script>
+  <script src="./vendor/blockio.js?v=12"></script>
+  <script src="./vendor/monaco/vs/loader.js"></script>
+  <script src="./app.js?v=12"></script>
+</body>
+</html>
