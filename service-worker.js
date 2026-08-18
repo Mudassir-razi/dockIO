@@ -10,7 +10,7 @@ const APP_SHELL = [
   "./manifest.webmanifest",
   "./vendor/marked.umd.js",
   "./vendor/blockio.js",
-  "./vendor/blockio.js?v=18",
+  "./vendor/blockio.js?v=19",
   "./vendor/monaco/vs/loader.js",
   "./icons/icon-192.png",
   "./icons/icon-512.png",

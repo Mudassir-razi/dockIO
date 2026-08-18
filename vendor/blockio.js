@@ -111,8 +111,8 @@
     diamond: 56,
     condW: 120,
     condH: 28,
-    gateW: 72,
-    gateH: 48,
+    gateW: 40,
+    gateH: 26,
     junctionR: 3
   };
   
@@ -1233,8 +1233,9 @@
       pins.forEach(function (conn, i) {
         let pin = conn.pin;
         if (!pin) {
-          if (spec && spec.extra && i >= spec.pins.length) pin = "a";
-          else pin = spec && spec.pins[i] ? spec.pins[i] : "p" + i;
+          if (spec && spec.extra && i >= spec.pins.length) {
+            pin = (spec.pins[1] || "a") + String(i);
+          } else pin = spec && spec.pins[i] ? spec.pins[i] : "p" + i;
         }
         resolved.push({ pin: pin, net: conn.net });
       });
@@ -2159,25 +2160,33 @@
             width: port.width,
             loc: port.loc
           });
-          connectPin("port:" + port.name, "io", port.name, port.direction);
+          connectPin(
+            "port:" + port.name,
+            "io",
+            port.name,
+            port.direction === "output" ? "input" : port.direction === "input" ? "output" : "inout"
+          );
         });
         (top.nets || []).forEach(function (name) {
           touchNet(name);
         });
         (top.gates || []).forEach(function (gate) {
+          const usedPins = Object.create(null);
+          const resolved = [];
+          gate.pins.forEach(function (conn, i) {
+            let pinName = conn.pin || "p" + i;
+            if (usedPins[pinName]) pinName = pinName + "_" + i;
+            usedPins[pinName] = true;
+            resolved.push({ pin: pinName, net: conn.net });
+            connectPin(gate.name, pinName, conn.net, i === 0 ? "output" : "input");
+          });
           addNode({
             id: gate.name,
             kind: "gate",
             gateKind: gate.kind,
             name: gate.name,
-            pins: gate.pins,
+            pins: resolved,
             loc: gate.loc
-          });
-          const spec = GATE_KINDS[gate.kind];
-          gate.pins.forEach(function (conn, i) {
-            const pinName = conn.pin;
-            const isOut = spec && spec.pins[0] === pinName || (i === 0 && !conn.pin);
-            connectPin(gate.name, pinName, conn.net, isOut ? "output" : "input");
           });
         });
       }
@@ -2920,42 +2929,73 @@
     return [];
   }
   
-  function choosePort(box, side, hint, used, wide) {
-    if (!box || isDiamond(box) || box.textOnly) return null;
-    const list = portsOnSide(box, side);
-    if (!list.length) return null;
-    function free(port) {
-      const name = port && port.port && port.port.name;
-      if (!name) return true;
-      return !used[box.id + ":" + name];
-    }
-    if (hint) {
-      const named = list.find(function (p) {
-        return p.port && p.port.name === hint;
-      });
-      if (named) return named;
-    }
-    if (wide) {
-      const fat = list.find(function (p) {
-        return p.port && p.port.width > 1 && free(p);
-      });
-      if (fat) return fat;
-    }
-    return list.find(free) || list[0];
+  function choosePort(box, side, hint) {
+    if (!hint || !box || isDiamond(box) || box.textOnly) return null;
+    const named = (box.leftPorts || []).concat(box.rightPorts || []).find(function (p) {
+      return p.port && p.port.name === hint;
+    });
+    if (!named) return null;
+    if (side === "left" && (box.leftPorts || []).indexOf(named) < 0) return null;
+    if (side === "right" && (box.rightPorts || []).indexOf(named) < 0) return null;
+    return named;
   }
   
-  function attachFromChoice(box, side, port, t, yLock) {
+  function yClear(y, taken, gap) {
+    for (let i = 0; i < (taken || []).length; i += 1) {
+      if (Math.abs(taken[i] - y) < gap - 0.5) return false;
+    }
+    return true;
+  }
+  
+  function freeAttachY(box, side, preferY, taken) {
+    const gap = LAYOUT.portH + 4;
+    const lo = box.y + 8;
+    const hi = box.y + box.height - 8;
+    const mid = box.y + box.height / 2;
+    const ports = portsOnSide(box, side)
+      .map(function (p) {
+        return p.y;
+      })
+      .sort(function (a, b) {
+        return a - b;
+      });
+    const occupied = ports.concat(taken || []);
+    function ok(y) {
+      return y >= lo && y <= hi && yClear(y, occupied, gap);
+    }
+    const candidates = [];
+    if (preferY != null) candidates.push(preferY);
+    if (ports.length) {
+      candidates.push(ports[0] - gap);
+      candidates.push(ports[ports.length - 1] + gap);
+    }
+    candidates.push(mid);
+    for (let d = gap; d < box.height + gap; d += gap) {
+      if (preferY != null) {
+        candidates.push(preferY - d);
+        candidates.push(preferY + d);
+      }
+      candidates.push(mid - d);
+      candidates.push(mid + d);
+    }
+    for (let i = 0; i < candidates.length; i += 1) {
+      if (ok(candidates[i])) return candidates[i];
+    }
+    return Math.max(lo, Math.min(hi, preferY != null ? preferY : mid));
+  }
+  
+  function attachFromChoice(box, side, port, t, yLock, taken) {
     if (isDiamond(box)) return attachPoint(box, side, t);
     if (port && (side === "left" || side === "right")) {
+      const tip = LAYOUT.pinLen;
       return {
-        x: side === "left" ? box.x : box.x + box.width,
+        x: side === "left" ? box.x - tip : box.x + box.width + tip,
         y: port.y,
         dir: side
       };
     }
-    if (yLock != null && (side === "left" || side === "right") && box.height > 0) {
-      const inset = Math.min(8, Math.max(2, box.height / 4));
-      const y = Math.max(box.y + inset, Math.min(box.y + box.height - inset, yLock));
+    if (side === "left" || side === "right") {
+      const y = freeAttachY(box, side, yLock, taken);
       return {
         x: side === "left" ? box.x : box.x + box.width,
         y: y,
@@ -2963,12 +3003,6 @@
       };
     }
     return attachPoint(box, side, t);
-  }
-  
-  function markWired(box, port, used) {
-    if (!box || !port || !port.port) return;
-    port.wired = true;
-    used[box.id + ":" + port.port.name] = true;
   }
   
   // ASM diamonds: one input vertex (top) and two outputs on the remaining
@@ -3904,8 +3938,22 @@
     const channels = routeChannels(boxes, origin, grid);
     const pairCount = Object.create(null);
     const usage = Object.create(null);
-    const usedPorts = Object.create(null);
+    const usedYs = Object.create(null);
     const routes = [];
+  
+    function occKey(box, side) {
+      return box.id + ":" + side;
+    }
+  
+    function takenYs(box, side) {
+      return usedYs[occKey(box, side)] || [];
+    }
+  
+    function rememberY(box, side, y) {
+      const k = occKey(box, side);
+      if (!usedYs[k]) usedYs[k] = [];
+      usedYs[k].push(y);
+    }
   
     (buses || []).forEach(function (bus) {
       const sourceKey = bus.sourceId || bus.source;
@@ -3931,8 +3979,7 @@
   
       let best = null;
       let bestScore = Infinity;
-      let bestSrcPort = null;
-      let bestDstPort = null;
+      let bestPair = null;
       const straight = !facingPorts && alignedStraight(source, target, t);
       const straightOk =
         !diamondPairs &&
@@ -3946,21 +3993,23 @@
         sidePairs.forEach(function (pair) {
           if (isDiamond(source) && pair[0] === "top") return;
           if (isDiamond(target) && pair[1] !== "top") return;
-          const srcPort = choosePort(source, pair[0], bus.sourcePort, usedPorts, bus.wide);
-          const dstPort = choosePort(target, pair[1], bus.targetPort, usedPorts, bus.wide);
+          const srcPort = choosePort(source, pair[0], bus.sourcePort);
+          const dstPort = choosePort(target, pair[1], bus.targetPort);
           const p1 = attachFromChoice(
             source,
             pair[0],
             srcPort,
             source === target ? 0.3 : attachT,
-            dstPort && !srcPort ? dstPort.y : null
+            null,
+            takenYs(source, pair[0])
           );
           const p2 = attachFromChoice(
             target,
             pair[1],
             dstPort,
             source === target ? 0.7 : t,
-            srcPort && !dstPort ? srcPort.y : null
+            p1.y,
+            takenYs(target, pair[1])
           );
           let pts = null;
           if (approx(p1.x, p2.x) || approx(p1.y, p2.y)) {
@@ -3973,26 +4022,24 @@
           if (score < bestScore) {
             bestScore = score;
             best = { points: pts, dir1: pair[0], dir2: pair[1] };
-            bestSrcPort = srcPort;
-            bestDstPort = dstPort;
+            bestPair = pair;
           }
         });
       }
   
       if (!best) {
         const fb = diamondForcedPair(source, target, bus) || pref;
-        const srcPort = choosePort(source, fb[0], bus.sourcePort, usedPorts, bus.wide);
-        const dstPort = choosePort(target, fb[1], bus.targetPort, usedPorts, bus.wide);
-        const p1 = attachFromChoice(source, fb[0], srcPort, t, dstPort && !srcPort ? dstPort.y : null);
-        const p2 = attachFromChoice(target, fb[1], dstPort, t, srcPort && !dstPort ? srcPort.y : null);
+        const srcPort = choosePort(source, fb[0], bus.sourcePort);
+        const dstPort = choosePort(target, fb[1], bus.targetPort);
+        const p1 = attachFromChoice(source, fb[0], srcPort, t, null, takenYs(source, fb[0]));
+        const p2 = attachFromChoice(target, fb[1], dstPort, t, p1.y, takenYs(target, fb[1]));
         const x = source.x + source.width + LAYOUT.channelMin;
         best = {
           points: simplify([p1, { x: x, y: p1.y }, { x: x, y: p2.y }, p2]),
           dir1: fb[0],
           dir2: fb[1]
         };
-        bestSrcPort = srcPort;
-        bestDstPort = dstPort;
+        bestPair = fb;
         if (pathHitsBoxes(best.points, obstacles, source, target)) {
           const x2 = source.x - LAYOUT.channelMin;
           best.points = simplify([p1, { x: x2, y: p1.y }, { x: x2, y: p2.y }, p2]);
@@ -4008,8 +4055,10 @@
         if (isDiamond(target)) best.dir2 = endSide;
       }
       addUsage(best.points, usage);
-      markWired(source, bestSrcPort, usedPorts);
-      markWired(target, bestDstPort, usedPorts);
+      if (bestPair) {
+        rememberY(source, best.dir1 || bestPair[0], best.points[0].y);
+        rememberY(target, best.dir2 || bestPair[1], best.points[best.points.length - 1].y);
+      }
       const first = best.points[0];
       const last = best.points[best.points.length - 1];
       routes.push({
@@ -4150,7 +4199,7 @@
     };
   }
   
-  function buildBox(mod) {
+  function buildBox(mod, busCounts) {
     const rowBoxes = (mod.rows || []).map(function (row) {
       return (row || []).map(function (item) {
         if (item && item.type === "gap") return buildGapBox(item);
@@ -4171,7 +4220,7 @@
             nested: false
           };
         }
-        return buildBox(item);
+        return buildBox(item, busCounts);
       });
     });
     const childBoxes = [];
@@ -4216,7 +4265,12 @@
       : simple
         ? 48
         : LAYOUT.minModuleH;
-    height = Math.max(height, portH + (hasPins ? 20 : 0), simple ? 48 : 0);
+    const busLanes = hasPins ? (busCounts && busCounts[mod.name] ? busCounts[mod.name] : 0) : 0;
+    height = Math.max(
+      height,
+      portH + (hasPins ? 20 : 0) + busLanes * (LAYOUT.portH + 8),
+      simple ? 48 : 0
+    );
     return {
       mod: mod,
       name: mod.name,
@@ -4270,6 +4324,14 @@
       };
     }
   
+    const busCounts = Object.create(null);
+    buses.forEach(function (bus) {
+      const s = bus.source;
+      const t = bus.target;
+      if (s) busCounts[s] = (busCounts[s] || 0) + 1;
+      if (t) busCounts[t] = (busCounts[t] || 0) + 1;
+    });
+  
     let rootRows;
     if (ast.rows && ast.rows.length) {
       rootRows = ast.rows.map(function (row) {
@@ -4277,13 +4339,13 @@
           if (item && item.type === "gap") return buildGapBox(item);
           if (item && item.type === "text") return buildTextBox(item);
           if (!item || item.type === "empty" || item.type !== "module") return emptyRootCell();
-          return buildBox(item);
+          return buildBox(item, busCounts);
         });
       });
     } else {
       rootRows = [
         modules.map(function (mod) {
-          return buildBox(mod);
+          return buildBox(mod, busCounts);
         })
       ];
     }
@@ -4881,43 +4943,266 @@
   }
 
   /* ---- layout/circuit.js ---- */
-  function gateSize(kind, name) {
-    const label = name || kind;
-    const w = Math.max(LAYOUT.gateW, textWidth(label, 11) + 16);
-    if (kind === "not" || kind === "buf") return { width: 56, height: 36 };
-    if (kind === "mux") return { width: 70, height: 72 };
-    if (kind === "dff" || kind === "dffr" || kind === "latch") return { width: 72, height: 64 };
-    if (kind === "add") return { width: Math.max(80, w), height: 56 };
-    return { width: w, height: LAYOUT.gateH };
+  function approx(a, b) {
+    return Math.abs(a - b) < 0.75;
   }
   
-  function pinMap(kind, box) {
+  function gateSize(kind, nIn) {
+    const ins = Math.max(nIn || 2, 1);
+    if (kind === "not" || kind === "buf") return { width: 32, height: 22 };
+    if (kind === "mux") return { width: 44, height: 52 };
+    if (kind === "dff" || kind === "dffr" || kind === "latch") return { width: 48, height: 44 };
+    if (kind === "add") return { width: 48, height: 36 };
+    return { width: LAYOUT.gateW, height: Math.max(LAYOUT.gateH, 9 * ins + 10) };
+  }
+  
+  function bubbleOffset(kind) {
+    return kind === "nand" || kind === "nor" || kind === "xnor" || kind === "not" ? 10 : 0;
+  }
+  
+  function pinMap(kind, box, conns) {
     const spec = GATE_KINDS[kind] || { pins: ["y", "a", "b"] };
     const pins = {};
-    const inputs = spec.pins.slice(1);
     const midY = box.y + box.height / 2;
-    pins[spec.pins[0]] = { x: box.x + box.width, y: midY, dir: "right", name: spec.pins[0] };
     if (kind === "not" || kind === "buf") {
-      pins.a = { x: box.x, y: midY, dir: "left", name: "a" };
-    } else if (kind === "mux") {
+      const name = (conns && conns[0] && conns[0].pin) || spec.pins[0];
+      const inName = (conns && conns[1] && conns[1].pin) || "a";
+      pins[name] = { x: box.x + box.width + bubbleOffset(kind), y: midY, dir: "right", name: name };
+      pins[inName] = { x: box.x, y: midY, dir: "left", name: inName };
+      return pins;
+    }
+    if (kind === "mux") {
       pins.d0 = { x: box.x, y: box.y + box.height * 0.28, dir: "left", name: "d0" };
       pins.d1 = { x: box.x, y: box.y + box.height * 0.72, dir: "left", name: "d1" };
       pins.sel = { x: box.x + box.width / 2, y: box.y + box.height, dir: "bottom", name: "sel" };
       pins.y = { x: box.x + box.width, y: midY, dir: "right", name: "y" };
-    } else if (kind === "dff" || kind === "dffr" || kind === "latch") {
-      pins.d = { x: box.x, y: box.y + 16, dir: "left", name: "d" };
-      pins.clk = { x: box.x, y: box.y + box.height - 16, dir: "left", name: "clk" };
-      pins.q = { x: box.x + box.width, y: box.y + 16, dir: "right", name: "q" };
+      return pins;
+    }
+    if (kind === "dff" || kind === "dffr" || kind === "latch") {
+      pins.d = { x: box.x, y: box.y + 14, dir: "left", name: "d" };
+      pins.clk = { x: box.x, y: box.y + box.height - 14, dir: "left", name: "clk" };
+      pins.q = { x: box.x + box.width, y: box.y + 14, dir: "right", name: "q" };
       if (kind === "dffr") pins.rst = { x: box.x + box.width / 2, y: box.y, dir: "top", name: "rst" };
-      if (kind === "latch") pins.en = { x: box.x, y: box.y + box.height - 16, dir: "left", name: "en" };
-    } else {
-      const n = Math.max(inputs.length, 2);
-      inputs.forEach(function (pin, i) {
-        const y = box.y + ((i + 1) / (n + 1)) * box.height;
-        pins[pin] = { x: box.x, y: y, dir: "left", name: pin };
+      if (kind === "latch") pins.en = { x: box.x, y: box.y + box.height - 14, dir: "left", name: "en" };
+      return pins;
+    }
+    const list = conns && conns.length ? conns : spec.pins.map(function (p) {
+      return { pin: p };
+    });
+    const outName = list[0].pin || spec.pins[0];
+    pins[outName] = {
+      x: box.x + box.width + bubbleOffset(kind),
+      y: midY,
+      dir: "right",
+      name: outName
+    };
+    const ins = list.slice(1);
+    const n = Math.max(ins.length, 1);
+    ins.forEach(function (conn, i) {
+      const y = box.y + ((i + 1) / (n + 1)) * box.height;
+      pins[conn.pin] = { x: box.x, y: y, dir: "left", name: conn.pin };
+    });
+    return pins;
+  }
+  
+  function portPins(box) {
+    const mid = box.y + box.height / 2;
+    if (box.direction === "output") {
+      return { io: { x: box.x, y: mid, dir: "left", name: box.name } };
+    }
+    return { io: { x: box.x + box.width, y: mid, dir: "right", name: box.name } };
+  }
+  
+  function inputCount(node) {
+    return Math.max((node.pins || []).length - 1, 1);
+  }
+  
+  function colBoxes(boxes, rank) {
+    return boxes.filter(function (b) {
+      return b.rank === rank;
+    });
+  }
+  
+  function colExtent(col) {
+    let top = Infinity;
+    let bot = -Infinity;
+    col.forEach(function (b) {
+      top = Math.min(top, b.y);
+      bot = Math.max(bot, b.y + b.height);
+    });
+    return { top: top, bot: bot, mid: (top + bot) / 2 };
+  }
+  
+  function avg(nums) {
+    let s = 0;
+    nums.forEach(function (n) {
+      s += n;
+    });
+    return s / nums.length;
+  }
+  
+  function pinOf(box, pinName) {
+    if (box.pins && box.pins[pinName]) return box.pins[pinName];
+    return {
+      x: box.x,
+      y: box.y + box.height / 2,
+      dir: "left",
+      name: pinName
+    };
+  }
+  
+  function segKey(ax, ay, bx, by) {
+    const x1 = Math.round(ax);
+    const y1 = Math.round(ay);
+    const x2 = Math.round(bx);
+    const y2 = Math.round(by);
+    if (x1 < x2 || (x1 === x2 && y1 <= y2)) return x1 + "," + y1 + ":" + x2 + "," + y2;
+    return x2 + "," + y2 + ":" + x1 + "," + y1;
+  }
+  
+  function routeCircuitNets(boxes, model) {
+    const byId = Object.create(null);
+    boxes.forEach(function (b) {
+      byId[b.id] = b;
+    });
+    const routes = [];
+    const junctions = [];
+    const segs = Object.create(null);
+    const channelTracks = Object.create(null);
+    const junctionKeys = Object.create(null);
+  
+    function addSeg(ax, ay, bx, by) {
+      if (approx(ax, bx) && approx(ay, by)) return;
+      const k = segKey(ax, ay, bx, by);
+      if (segs[k]) return;
+      segs[k] = true;
+      const horiz = approx(ay, by);
+      routes.push({
+        bus: { name: "", direction: "forward", wide: false },
+        x1: ax,
+        y1: ay,
+        x2: bx,
+        y2: by,
+        dir1: horiz ? (bx > ax ? "right" : "left") : by > ay ? "bottom" : "top",
+        dir2: horiz ? (bx > ax ? "left" : "right") : by > ay ? "top" : "bottom",
+        points: [
+          { x: ax, y: ay },
+          { x: bx, y: by }
+        ]
       });
     }
-    return pins;
+  
+    function addJunction(x, y) {
+      const k = Math.round(x) + "," + Math.round(y);
+      if (junctionKeys[k]) return;
+      junctionKeys[k] = true;
+      junctions.push({ x: x, y: y });
+    }
+  
+    Object.keys(model.nets).forEach(function (name) {
+      const net = model.nets[name];
+      const attached = (net.pins || [])
+        .map(function (p) {
+          const box = byId[p.nodeId];
+          if (!box) return null;
+          const pt = pinOf(box, p.pin);
+          return { box: box, pt: pt, dir: p.dir, nodeId: p.nodeId, pin: p.pin };
+        })
+        .filter(Boolean);
+      const drivers = attached.filter(function (p) {
+        return p.dir === "output" || p.dir === "inout";
+      });
+      const loads = attached.filter(function (p) {
+        return p.dir === "input" || p.dir === "inout";
+      });
+      if (!drivers.length || !loads.length) return;
+  
+      const drv = drivers[0];
+      const dests = loads.filter(function (p) {
+        return !(p.nodeId === drv.nodeId && p.pin === drv.pin);
+      });
+      if (!dests.length) return;
+  
+      if (dests.length === 1 && approx(drv.pt.y, dests[0].pt.y)) {
+        addSeg(drv.pt.x, drv.pt.y, dests[0].pt.x, dests[0].pt.y);
+        return;
+      }
+  
+      const goingRight = dests.filter(function (d) {
+        return d.pt.x >= drv.pt.x - 1;
+      }).length >= dests.length / 2;
+  
+      let gapLo;
+      let gapHi;
+      if (goingRight) {
+        gapLo = drv.box.x + drv.box.width;
+        gapHi = Math.min.apply(
+          null,
+          dests.map(function (d) {
+            return d.pt.x;
+          })
+        );
+      } else {
+        gapHi = drv.pt.x;
+        gapLo = Math.max.apply(
+          null,
+          dests.map(function (d) {
+            return d.pt.x;
+          })
+        );
+      }
+      const srcRank = drv.box.rank;
+      const dstRank = Math.min.apply(
+        null,
+        dests.map(function (d) {
+          return d.box.rank;
+        })
+      );
+      const chanKey = srcRank + ">" + dstRank + (goingRight ? ">" : "<");
+      const track = channelTracks[chanKey] || 0;
+      channelTracks[chanKey] = track + 1;
+      const span = Math.max(gapHi - gapLo, LAYOUT.trackPitch * 2);
+      const base = gapLo + span * 0.38;
+      const spineX = goingRight
+        ? base + track * LAYOUT.trackPitch
+        : gapHi - span * 0.38 - track * LAYOUT.trackPitch;
+  
+      const extras = drivers.slice(1);
+      const ys = [drv.pt.y]
+        .concat(
+          dests.map(function (d) {
+            return d.pt.y;
+          })
+        )
+        .concat(
+          extras.map(function (e) {
+            return e.pt.y;
+          })
+        );
+      const y0 = Math.min.apply(null, ys);
+      const y1 = Math.max.apply(null, ys);
+  
+      addSeg(drv.pt.x, drv.pt.y, spineX, drv.pt.y);
+      if (y1 - y0 > 0.75) addSeg(spineX, y0, spineX, y1);
+      dests.forEach(function (d) {
+        addSeg(spineX, d.pt.y, d.pt.x, d.pt.y);
+      });
+      extras.forEach(function (extra) {
+        addSeg(extra.pt.x, extra.pt.y, spineX, extra.pt.y);
+      });
+  
+      ys.forEach(function (y) {
+        let degree = 0;
+        if (y - y0 > 0.75) degree += 1;
+        if (y1 - y > 0.75) degree += 1;
+        ys.forEach(function (ty) {
+          if (approx(ty, y)) degree += 1;
+        });
+        if (degree >= 3) addJunction(spineX, y);
+      });
+    });
+  
+    return { routes: routes, junctions: junctions };
   }
   
   function layoutCircuit(ast) {
@@ -4956,15 +5241,17 @@
       byRank[r].forEach(function (item) {
         const node = item.node;
         let size;
-        if (node.kind === "port") size = { width: 28, height: 18 };
-        else size = gateSize(node.gateKind, node.name);
+        if (node.kind === "port") {
+          size = { width: Math.max(18, textWidth(node.name, 11) + 8), height: 16 };
+        } else size = gateSize(node.gateKind, inputCount(node));
         colW[ci] = Math.max(colW[ci], size.width);
         boxes.push({
           id: node.id,
-          name: node.kind === "port" ? node.name : node.name,
+          name: node.name,
           kind: node.kind,
           gateKind: node.gateKind,
           direction: node.direction,
+          conns: node.pins || [],
           width: size.width,
           height: size.height,
           leftExtent: 0,
@@ -4984,54 +5271,115 @@
       });
     });
   
-    const gapX = LAYOUT.channelMin * 2.2;
-    const gapY = LAYOUT.channelMin * 1.4;
+    const portSeq = Object.create(null);
+    let portIdx = 0;
+    model.nodes.forEach(function (n) {
+      if (n.kind === "port" && n.direction !== "output") {
+        portSeq[n.id] = portIdx;
+        portIdx += 1;
+      }
+    });
+  
+    const byId = Object.create(null);
+    boxes.forEach(function (b) {
+      byId[b.id] = b;
+    });
+  
+    const gapX = LAYOUT.channelMin * 2.4;
+    const gapY = 22;
     let x = LAYOUT.pagePad;
     ranks.forEach(function (r, ci) {
-      const col = boxes.filter(function (b) {
-        return b.rank === r;
-      });
-      let y = LAYOUT.pagePad;
-      col.forEach(function (box) {
+      colBoxes(boxes, r).forEach(function (box) {
         box.x = x + (colW[ci] - box.width) / 2;
-        box.y = y;
-        box.pins = box.kind === "gate" ? pinMap(box.gateKind, box) : {
-          io: {
-            x: box.direction === "output" ? box.x + box.width : box.x,
-            y: box.y + box.height / 2,
-            dir: box.direction === "output" ? "right" : "left",
-            name: box.name
-          }
-        };
-        y += box.height + gapY;
       });
       x += colW[ci] + gapX;
     });
   
-    const routes = routePinWires(boxes, model.edges);
-    const junctions = [];
-    const netPoints = Object.create(null);
-    routes.forEach(function (route) {
-      const name = route.edge && route.edge.name;
-      if (!name) return;
-      if (!netPoints[name]) netPoints[name] = [];
-      netPoints[name].push(route.points[0]);
-      netPoints[name].push(route.points[route.points.length - 1]);
+    ranks.forEach(function (r, ci) {
+      const col = colBoxes(boxes, r);
+      if (ci === 0) {
+        col.sort(function (a, b) {
+          const ao = a.kind === "port" && portSeq[a.id] != null ? portSeq[a.id] : 1000 + a.order;
+          const bo = b.kind === "port" && portSeq[b.id] != null ? portSeq[b.id] : 1000 + b.order;
+          return ao - bo;
+        });
+        let y = LAYOUT.pagePad;
+        col.forEach(function (box) {
+          box.y = y;
+          y += box.height + gapY;
+        });
+        return;
+      }
+      col.forEach(function (box) {
+        const preds = [];
+        model.edges.forEach(function (e) {
+          if (e.target !== box.id) return;
+          const src = byId[e.source];
+          if (!src || src.rank >= box.rank) return;
+          preds.push(src.y + src.height / 2);
+        });
+        box._idealY = preds.length ? avg(preds) - box.height / 2 : LAYOUT.pagePad;
+      });
+      col.sort(function (a, b) {
+        if (a._idealY !== b._idealY) return a._idealY - b._idealY;
+        return a.order - b.order;
+      });
+      let y = LAYOUT.pagePad;
+      col.forEach(function (box, i) {
+        const ideal = isFinite(box._idealY) ? box._idealY : LAYOUT.pagePad;
+        box.y = i === 0 ? Math.max(LAYOUT.pagePad, ideal) : Math.max(y, ideal);
+        y = box.y + box.height + gapY;
+      });
     });
-    Object.keys(netPoints).forEach(function (name) {
-      const pts = netPoints[name];
-      if (pts.length > 2) {
-        junctions.push({ x: pts[0].x, y: pts[0].y, name: name });
+  
+    let tallMid = null;
+    let tallSpan = 0;
+    ranks.forEach(function (r) {
+      const ext = colExtent(colBoxes(boxes, r));
+      const span = ext.bot - ext.top;
+      if (span > tallSpan) {
+        tallSpan = span;
+        tallMid = ext.mid;
       }
     });
+    if (tallMid != null) {
+      ranks.forEach(function (r) {
+        const col = colBoxes(boxes, r);
+        const ext = colExtent(col);
+        const dy = tallMid - ext.mid;
+        col.forEach(function (box) {
+          box.y += dy;
+        });
+      });
+    }
+  
+    boxes.forEach(function (box) {
+      box.pins = box.kind === "gate" ? pinMap(box.gateKind, box, box.conns) : portPins(box);
+    });
+  
+    boxes.forEach(function (port) {
+      if (port.kind !== "port" || port.direction !== "output") return;
+      const net = model.nets[port.name];
+      if (!net) return;
+      const drv = (net.pins || []).find(function (p) {
+        return p.dir === "output" && p.nodeId !== port.id;
+      });
+      if (!drv) return;
+      const gbox = byId[drv.nodeId];
+      if (!gbox || !gbox.pins || !gbox.pins[drv.pin]) return;
+      port.y = gbox.pins[drv.pin].y - port.height / 2;
+      port.pins = portPins(port);
+    });
+  
+    const routed = routeCircuitNets(boxes, model);
   
     let maxRight = 0;
     let maxBottom = 0;
     boxes.forEach(function (b) {
-      maxRight = Math.max(maxRight, b.x + b.width + 20);
+      maxRight = Math.max(maxRight, b.x + b.width + 24);
       maxBottom = Math.max(maxBottom, b.y + b.height + 20);
     });
-    routes.forEach(function (item) {
+    routed.routes.forEach(function (item) {
       (item.points || []).forEach(function (pt) {
         maxRight = Math.max(maxRight, pt.x + 8);
         maxBottom = Math.max(maxBottom, pt.y + 8);
@@ -5043,11 +5391,11 @@
       width: Math.max(maxRight + LAYOUT.pagePad, 320),
       height: Math.max(maxBottom + LAYOUT.pagePad, 140),
       modules: flattenBoxes(boxes, []),
-      buses: routes,
+      buses: routed.routes,
       grid: { levels: [{ depth: 0, clip: null, cells: [], xs: lines.xs, ys: lines.ys }] },
       empty: false,
       kind: "circuit",
-      junctions: junctions
+      junctions: routed.junctions
     };
   }
 
@@ -5281,7 +5629,7 @@
       ".blockio-group-label{fill:var(--blockio-muted,#c5ccd4);font-size:10px;font-weight:700;font-family:'Courier New',Courier,monospace}",
       ".blockio-bus{fill:none;stroke:var(--blockio-wire,#ffffff);stroke-width:1.25;stroke-linecap:butt;stroke-linejoin:miter}",
       ".blockio-bus-wide{fill:var(--blockio-module-fill,#000000);stroke:var(--blockio-wire,#ffffff);stroke-width:1.25;stroke-linejoin:miter}",
-      ".blockio-bus-label-bg{fill:var(--blockio-module-fill,#000000);stroke:var(--blockio-wire,#ffffff);stroke-width:1.15}",
+      ".blockio-bus-label-bg{fill:var(--blockio-module-fill,#000000);stroke:none}",
       ".blockio-bus-label{fill:var(--blockio-ink,#ffffff);font-size:11px;font-weight:700;font-family:'Courier New',Courier,monospace}",
       ".blockio-note{fill:var(--blockio-ink,#ffffff);font-size:11px;font-family:'Courier New',Courier,monospace}",
       ".blockio-state-name{fill:var(--blockio-ink,#ffffff);font-size:13px;font-weight:700;font-family:'Courier New',Courier,monospace}",
@@ -5306,37 +5654,34 @@
     (ports || []).forEach(function (item) {
       const atLeft = side === "left";
       const edgeX = atLeft ? moduleBox.x : moduleBox.x + moduleBox.width;
-      const wired = !!item.wired;
       const endX = atLeft ? edgeX - LAYOUT.pinLen : edgeX + LAYOUT.pinLen;
       const y = item.y;
-      if (!wired) {
+      out.push(
+        '<line x1="' + round(edgeX) + '" y1="' + round(y) + '" x2="' + round(endX) + '" y2="' + round(y) + '" class="blockio-pin"/>'
+      );
+      const dir = item.port.direction;
+      const intoModule = dir === "input";
+      if (dir === "inout") {
+        const midX = (edgeX + endX) / 2;
         out.push(
-          '<line x1="' + round(edgeX) + '" y1="' + round(y) + '" x2="' + round(endX) + '" y2="' + round(y) + '" class="blockio-pin"/>'
+          '<polygon points="' +
+            pointsAttr([
+              [midX, y - 4],
+              [midX + 4, y],
+              [midX, y + 4],
+              [midX - 4, y]
+            ]) +
+            '" class="blockio-inout"/>'
         );
-        const dir = item.port.direction;
-        const intoModule = dir === "input";
-        if (dir === "inout") {
-          const midX = (edgeX + endX) / 2;
-          out.push(
-            '<polygon points="' +
-              pointsAttr([
-                [midX, y - 4],
-                [midX + 4, y],
-                [midX, y + 4],
-                [midX - 4, y]
-              ]) +
-              '" class="blockio-inout"/>'
-          );
-        } else {
-          const tipX = intoModule ? edgeX : endX;
-          const pointing = intoModule ? (atLeft ? "right" : "left") : atLeft ? "left" : "right";
-          out.push(
-            '<polygon points="' + pointsAttr(triangle(tipX, y, pointing, 5)) + '" class="blockio-arrow"/>'
-          );
-        }
+      } else {
+        const tipX = intoModule ? edgeX : endX;
+        const pointing = intoModule ? (atLeft ? "right" : "left") : atLeft ? "left" : "right";
+        out.push(
+          '<polygon points="' + pointsAttr(triangle(tipX, y, pointing, 5)) + '" class="blockio-arrow"/>'
+        );
       }
       if (item.port.width > 1) {
-        const slashX = wired ? (atLeft ? edgeX - 16 : edgeX + 16) : (edgeX + endX) / 2;
+        const slashX = (edgeX + endX) / 2;
         out.push(
           '<line x1="' +
             round(slashX - 5) +
@@ -5360,12 +5705,11 @@
       }
       const textX = atLeft ? endX - LAYOUT.labelGap : endX + LAYOUT.labelGap;
       const anchor = atLeft ? "end" : "start";
-      const textY = wired ? y - 10 : y + 4;
       out.push(
         '<text x="' +
           round(textX) +
           '" y="' +
-          round(textY) +
+          round(y + 4) +
           '" text-anchor="' +
           anchor +
           '" class="blockio-port">' +
@@ -5474,20 +5818,22 @@
         );
       } else {
         out.push('<path d="' + busPathFromPoints(pts) + '" class="blockio-bus"/>');
-        out.push(
-          '<polygon points="' +
-            pointsAttr(triangle(item.x2, item.y2, intoPointing(item.dir2), 6)) +
-            '" class="blockio-arrow"/>'
-        );
-        if (bus.direction === "bidirectional") {
+        if (laid.kind !== "circuit") {
           out.push(
             '<polygon points="' +
-              pointsAttr(triangle(item.x1, item.y1, intoPointing(item.dir1), 6)) +
+              pointsAttr(triangle(item.x2, item.y2, intoPointing(item.dir2), 6)) +
               '" class="blockio-arrow"/>'
           );
+          if (bus.direction === "bidirectional") {
+            out.push(
+              '<polygon points="' +
+                pointsAttr(triangle(item.x1, item.y1, intoPointing(item.dir1), 6)) +
+                '" class="blockio-arrow"/>'
+            );
+          }
         }
       }
-      if (bus.name) {
+      if (bus.name && laid.kind !== "circuit") {
         const branch = bus.name === "1" || bus.name === "0";
         const pos =
           branch && item.source && item.source.kind === "diamond"
@@ -5859,12 +6205,18 @@
   
     (laid.modules || []).forEach(function (item) {
       if (item.kind === "port") {
+        const pin = item.pins && item.pins.io;
+        const px = pin ? pin.x : item.x + item.width / 2;
+        const py = pin ? pin.y : item.y + item.height / 2;
+        const output = item.direction === "output";
         out.push(
           '<text x="' +
-            round(item.x + item.width / 2) +
+            round(output ? px + 8 : px - 8) +
             '" y="' +
-            round(item.y + item.height / 2 + 4) +
-            '" text-anchor="middle" class="blockio-port-term">' +
+            round(py + 4) +
+            '" text-anchor="' +
+            (output ? "start" : "end") +
+            '" class="blockio-port-term">' +
             escapeXml(item.name) +
             "</text>"
         );
@@ -5905,7 +6257,7 @@
         );
       }
       if (kind === "dff" || kind === "dffr" || kind === "latch") {
-        const cy = item.y + item.height - 16;
+        const cy = item.y + item.height - 14;
         out.push(
           '<path d="M ' +
             round(item.x) +
@@ -5922,15 +6274,15 @@
             '" class="blockio-pin"/>'
         );
       }
-      out.push(
-        '<text x="' +
-          round(item.x + item.width / 2) +
-          '" y="' +
-          round(item.y + item.height / 2 + 4) +
-          '" text-anchor="middle" class="blockio-title">' +
-          escapeXml(item.name) +
-          "</text>"
-      );
+      Object.keys(item.pins || {}).forEach(function (key) {
+        const p = item.pins[key];
+        if (!p || p.dir !== "left") return;
+        out.push(
+          '<polygon points="' +
+            pointsAttr(triangle(p.x, p.y, "right", 4)) +
+            '" class="blockio-arrow"/>'
+        );
+      });
     });
   
     renderGrid(out, laid, options);
