@@ -18,20 +18,22 @@
   --sidebar-open-width: 340px;
   --banner-height: 56px;
   --focus: #4cc2ff;
-  /* SystemVerilog preview tokens */
-  --sv-comment: #7f93a8;
-  --sv-string: #5eead4;
-  --sv-number: #93c5fd;
-  --sv-directive: #38bdf8;
-  --sv-system: #2dd4bf;
-  --sv-keyword: #c45c6a;
-  --sv-control: #d47884;
-  --sv-type: #67e8f9;
-  --sv-structure: #7dd3fc;
-  --sv-port: #b94a5a;
-  --sv-operator: #94a3b8;
-  --sv-endpoint:#90a40d;
-  --sv-mod:#22d440;
+  /* Code preview tokens: VS Code Dark+ */
+  --sv-comment: #6a9955;
+  --sv-string: #ce9178;
+  --sv-number: #b5cea8;
+  --sv-directive: #c586c0;
+  --sv-system: #dcdcaa;
+  --sv-keyword: #569cd6;
+  --sv-control: #c586c0;
+  --sv-type: #4ec9b0;
+  --sv-structure: #569cd6;
+  --sv-port: #569cd6;
+  --sv-operator: #d4d4d4;
+  --sv-endpoint: #c586c0;
+  --sv-mod: #569cd6;
+  --sv-function: #dcdcaa;
+  --sv-variable: #9cdcfe;
   --blockio-ink: var(--ink);
   --blockio-muted: var(--muted);
   --blockio-line: var(--line);
@@ -56,17 +58,21 @@ html[data-theme="light"] {
   --signal-bg: rgba(14, 165, 233, 0.12);
   --shadow: 0 10px 28px rgba(15, 23, 42, 0.12);
   --focus: #0284c7;
-  --sv-comment: #64748b;
-  --sv-string: #0f766e;
-  --sv-number: #1d4ed8;
-  --sv-directive: #0369a1;
-  --sv-system: #0d9488;
-  --sv-keyword: #9f1239;
-  --sv-control: #be123c;
-  --sv-type: #0e7490;
-  --sv-structure: #075985;
-  --sv-port: #9f1239;
-  --sv-operator: #475569;
+  --sv-comment: #008000;
+  --sv-string: #a31515;
+  --sv-number: #098658;
+  --sv-directive: #af00db;
+  --sv-system: #795e26;
+  --sv-keyword: #0000ff;
+  --sv-control: #af00db;
+  --sv-type: #267f99;
+  --sv-structure: #0000ff;
+  --sv-port: #0000ff;
+  --sv-operator: #393a34;
+  --sv-endpoint: #af00db;
+  --sv-mod: #0000ff;
+  --sv-function: #795e26;
+  --sv-variable: #001080;
 }
 
 * {
@@ -686,12 +692,43 @@ html[data-theme="light"] .icon-moon {
 }
 
 .diagram {
+  position: relative;
   margin: 1.2em 0;
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--surface);
   overflow: auto;
+}
+
+.blockio-grid-toggle {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  padding: 2px 10px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.diagram:hover .blockio-grid-toggle,
+.blockio-grid-toggle:focus-visible,
+.blockio-grid-toggle.is-active {
+  opacity: 1;
+}
+
+.blockio-grid-toggle.is-active {
+  color: var(--ink);
+  border-color: var(--accent-doc);
+  background: var(--accent-soft);
 }
 
 .diagram svg {
@@ -739,11 +776,17 @@ html[data-theme="light"] .icon-moon {
 .diagram-error {
   margin: 0.6em 0 1.2em;
   padding: 8px 12px;
-  border: 1px solid color-mix(in srgb, var(--sv-keyword) 45%, var(--line));
+  border: 1px solid color-mix(in srgb, #c45c6a 45%, var(--line));
   border-radius: 8px;
-  background: color-mix(in srgb, var(--sv-keyword) 12%, var(--surface));
-  color: var(--sv-keyword);
+  background: color-mix(in srgb, #c45c6a 12%, var(--surface));
+  color: #c45c6a;
   font-size: 13px;
+}
+
+html[data-theme="light"] .diagram-error {
+  border-color: color-mix(in srgb, #9f1239 45%, var(--line));
+  background: color-mix(in srgb, #9f1239 12%, var(--surface));
+  color: #9f1239;
 }
 
 .diagram-verilog {
@@ -764,18 +807,70 @@ html[data-theme="light"] .icon-moon {
   margin: 8px 0 0;
 }
 
-/* SystemVerilog token colors */
-.sv-comment { color: var(--sv-comment); }
+/* Fenced-code token colors (VS Code Dark+ / Light+) */
+.sv-comment { color: var(--sv-comment); font-style: italic; }
 .sv-string { color: var(--sv-string); }
 .sv-number { color: var(--sv-number); }
 .sv-directive { color: var(--sv-directive); }
 .sv-system { color: var(--sv-system); }
-.sv-keyword { color: var(--sv-keyword); font-weight: 600; }
-.sv-control { color: var(--sv-control); font-weight: 600; }
+.sv-keyword { color: var(--sv-keyword); }
+.sv-control { color: var(--sv-control); }
 .sv-type { color: var(--sv-type); }
-.sv-structure { color: var(--sv-structure); font-weight: 600; }
-.sv-port { color: var(--sv-port); font-weight: 600; }
+.sv-structure { color: var(--sv-structure); }
+.sv-port { color: var(--sv-port); }
 .sv-operator { color: var(--sv-operator); }
+.sv-endpoint { color: var(--sv-endpoint); }
+.sv-mod { color: var(--sv-mod); }
+.sv-function { color: var(--sv-function); }
+.sv-variable { color: var(--sv-variable); }
+
+.markdown-body pre.file-tree {
+  line-height: 1.35;
+  letter-spacing: 0;
+  font-variant-ligatures: none;
+  font-family: "Cascadia Mono", "Cascadia Code", "Courier New", Consolas, monospace;
+}
+
+.markdown-body pre.file-tree code {
+  display: block;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.35;
+  white-space: pre;
+  font-variant-ligatures: none;
+}
+
+.tree-line {
+  display: inline;
+  line-height: inherit;
+  vertical-align: top;
+}
+
+.tree-guide {
+  display: inline-block;
+  color: var(--muted);
+  font-weight: 400;
+  line-height: 1;
+  letter-spacing: 0;
+  transform: scaleY(1.4);
+  transform-origin: center;
+  vertical-align: middle;
+}
+
+.tree-dir,
+.tree-file {
+  padding-left: 0;
+  vertical-align: middle;
+}
+
+.tree-dir {
+  color: var(--signal);
+  font-weight: 600;
+}
+
+.tree-file {
+  color: var(--code-fg);
+}
 
 .app[data-mode="launch"] .workspace,
 .app[data-mode="launch"] .sidebar {
@@ -854,6 +949,10 @@ html[data-theme="light"] .icon-moon {
   }
 
   .diagram-verilog {
+    break-inside: avoid;
+  }
+
+  .file-tree {
     break-inside: avoid;
   }
 }

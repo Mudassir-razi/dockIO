@@ -1,16 +1,16 @@
 /* Portable Documentation offline cache */
-const CACHE_NAME = "portable-docs-v12";
+const CACHE_NAME = "portable-docs-v19";
 const APP_SHELL = [
   "./",
   "./index.html",
   "./styles.css",
-  "./styles.css?v=12",
+  "./styles.css?v=19",
   "./app.js",
-  "./app.js?v=12",
+  "./app.js?v=19",
   "./manifest.webmanifest",
   "./vendor/marked.umd.js",
   "./vendor/blockio.js",
-  "./vendor/blockio.js?v=12",
+  "./vendor/blockio.js?v=18",
   "./vendor/monaco/vs/loader.js",
   "./icons/icon-192.png",
   "./icons/icon-512.png",

@@ -177,7 +177,15 @@ endmodule
   }
 
   function highlightSystemVerilog(code) {
-    const allWords = [SV_TYPES, SV_PORTS, SV_STRUCTURE, SV_CONTROL, SV_KEYWORD].join("|");
+    const allWords = [
+      SV_TYPES,
+      SV_PORTS,
+      SV_STRUCTURE,
+      SV_CONTROL,
+      SV_KEYWORD,
+      SV_ENDPOINTS,
+      SV_MOD
+    ].join("|");
     const tokenRegex = new RegExp(
       String.raw`(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|(\`\w+\b)|(\$\w+\b)|(\b(?:${allWords})\b)|(\b\d*\s*'[sS]?[bBhHdDoO][0-9a-fA-F_xXzZ]+|\b\d[\d_]*\b)|([{}()\[\];,:.#@=~+\-*/%<>!?|&^]+)`,
       "g"
@@ -194,7 +202,7 @@ endmodule
       if (comment) cls = "sv-comment";
       else if (string) cls = "sv-string";
       else if (directive) cls = "sv-directive";
-      else if (system) cls = "sv-system";
+      else if (system) cls = "sv-function";
       else if (keyword) cls = classifyKeyword(keyword);
       else if (number) cls = "sv-number";
       else if (operator) cls = "sv-operator";
@@ -208,15 +216,234 @@ endmodule
     return result;
   }
 
-  function shouldHighlight(lang) {
-    if (!lang) return false;
-    const normalized = lang.toLowerCase().trim();
-    return (
+  function highlightWithRegex(code, tokenRegex, classify) {
+    let result = "";
+    let lastIndex = 0;
+    let match;
+    tokenRegex.lastIndex = 0;
+    while ((match = tokenRegex.exec(code)) !== null) {
+      result += escapeHtml(code.slice(lastIndex, match.index));
+      const cls = classify(match);
+      result += cls
+        ? `<span class="${cls}">${escapeHtml(match[0])}</span>`
+        : escapeHtml(match[0]);
+      lastIndex = match.index + match[0].length;
+    }
+    result += escapeHtml(code.slice(lastIndex));
+    return result;
+  }
+
+  function highlightPython(code) {
+    const keywords =
+      "False|None|True|and|as|assert|async|await|break|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|raise|return|try|while|with|yield";
+    const types =
+      "bool|bytearray|bytes|complex|dict|float|frozenset|int|list|memoryview|object|set|str|tuple|type";
+    const builtins =
+      "abs|all|any|bin|callable|chr|classmethod|dir|enumerate|filter|format|getattr|globals|hasattr|hash|help|hex|id|input|isinstance|issubclass|iter|len|map|max|min|next|oct|open|ord|pow|print|property|range|repr|reversed|round|setattr|slice|sorted|staticmethod|sum|super|vars|zip";
+    const tokenRegex = new RegExp(
+      String.raw`([fFrRbBuU]{0,2}"""[\s\S]*?"""|[fFrRbBuU]{0,2}'''[\s\S]*?'''|#.*$|[fFrRbBuU]{0,2}"(?:\\.|[^"\\])*"|[fFrRbBuU]{0,2}'(?:\\.|[^'\\])*')|(\b(?:${keywords})\b)|(\b(?:${types})\b)|(\b(?:${builtins})\b)|(@[A-Za-z_]\w*)|(\bself\b|\bcls\b)|(\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b)|([{}()\[\]:,.=+\-*/%<>!|&^~]+)`,
+      "gm"
+    );
+    return highlightWithRegex(code, tokenRegex, (match) => {
+      if (match[1]) return match[1].trimStart().startsWith("#") ? "sv-comment" : "sv-string";
+      if (match[2]) return "sv-keyword";
+      if (match[3]) return "sv-type";
+      if (match[4]) return "sv-function";
+      if (match[5]) return "sv-function";
+      if (match[6]) return "sv-variable";
+      if (match[7]) return "sv-number";
+      if (match[8]) return "sv-operator";
+      return "";
+    });
+  }
+
+  function highlightBash(code) {
+    const keywords =
+      "if|then|else|elif|fi|for|while|until|do|done|case|esac|function|in|select|time|return|break|continue|exit";
+    const builtins =
+      "echo|printf|cd|ls|pwd|export|unset|read|test|shift|trap|eval|exec|source|alias|unalias|true|false|wait|kill|jobs|local|declare|typeset|readonly|let|mapfile|readarray";
+    const tokenRegex = new RegExp(
+      String.raw`((?<!\$)#[^\n]*)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|(\$\{?[A-Za-z_][\w-]*\}?|\$\d+|\$[#@*?!\-])|(\b(?:${keywords})\b)|(\b(?:${builtins})\b)|(--?[A-Za-z][\w-]*)|(\b\d+\b)|([|;&<>()\[\]{}=!]+)`,
+      "g"
+    );
+    return highlightWithRegex(code, tokenRegex, (match) => {
+      if (match[1]) return "sv-comment";
+      if (match[2]) return "sv-string";
+      if (match[3]) return "sv-variable";
+      if (match[4]) return "sv-control";
+      if (match[5]) return "sv-function";
+      if (match[6]) return "sv-variable";
+      if (match[7]) return "sv-number";
+      if (match[8]) return "sv-operator";
+      return "";
+    });
+  }
+
+  function highlightTcl(code) {
+    const keywords =
+      "proc|set|unset|if|else|elseif|for|foreach|while|switch|catch|return|break|continue|source|package|namespace|expr|global|upvar|variable|eval|uplevel|incr|append";
+    const commands =
+      "puts|gets|open|close|list|lindex|llength|lappend|lrange|lsort|dict|array|string|concat|join|split|regexp|regsub|format|scan|clock|file|glob|cd|pwd|exec|pid|after|update|bind|pack|grid|wm|frame|button|label|entry";
+    const tokenRegex = new RegExp(
+      String.raw`(#[^\n]*)|("(?:\\.|[^"\\])*")|(\$[A-Za-z_:][\w:]*)|(\b(?:${keywords})\b)|(\b(?:${commands})\b)|(\b\d+(?:\.\d+)?\b)|([{}()\[\];])`,
+      "g"
+    );
+    return highlightWithRegex(code, tokenRegex, (match) => {
+      if (match[1]) return "sv-comment";
+      if (match[2]) return "sv-string";
+      if (match[3]) return "sv-variable";
+      if (match[4]) return "sv-keyword";
+      if (match[5]) return "sv-function";
+      if (match[6]) return "sv-number";
+      if (match[7]) return "sv-operator";
+      return "";
+    });
+  }
+
+  function fenceKind(lang) {
+    const normalized = String(lang || "").toLowerCase().trim().split(/\s+/)[0];
+    if (
       normalized === "systemverilog" ||
       normalized === "sv" ||
       normalized === "verilog" ||
       normalized === "v"
+    ) {
+      return "sv";
+    }
+    if (normalized === "python" || normalized === "py") return "python";
+    if (
+      normalized === "bash" ||
+      normalized === "sh" ||
+      normalized === "shell" ||
+      normalized === "zsh"
+    ) {
+      return "bash";
+    }
+    if (normalized === "tcl" || normalized === "tk" || normalized === "wish") return "tcl";
+    if (
+      normalized === "tree" ||
+      normalized === "filetree" ||
+      normalized === "files" ||
+      normalized === "dir"
+    ) {
+      return "tree";
+    }
+    return null;
+  }
+
+  function highlightFence(lang, text) {
+    const kind = fenceKind(lang);
+    if (kind === "sv") return highlightSystemVerilog(text);
+    if (kind === "python") return highlightPython(text);
+    if (kind === "bash") return highlightBash(text);
+    if (kind === "tcl") return highlightTcl(text);
+    return null;
+  }
+
+  function detectTreeIndentUnit(spaceLengths) {
+    if (!spaceLengths.length) return 2;
+    if (spaceLengths.every((n) => n % 4 === 0)) return 4;
+    if (spaceLengths.every((n) => n % 2 === 0)) return 2;
+    return 1;
+  }
+
+  function leadingTreeDepth(ws, spaceUnit) {
+    let depth = 0;
+    let spaces = 0;
+    for (let i = 0; i < ws.length; i += 1) {
+      if (ws[i] === "\t") {
+        depth += 1 + Math.floor(spaces / spaceUnit);
+        spaces = 0;
+      } else if (ws[i] === " ") {
+        spaces += 1;
+      }
+    }
+    depth += Math.floor(spaces / spaceUnit);
+    return depth;
+  }
+
+  function parseTreeItems(text) {
+    const raw = String(text || "").replace(/\r\n/g, "\n").split("\n");
+    const rows = [];
+    raw.forEach((line) => {
+      if (!line.trim()) return;
+      const match = line.match(/^([ \t]*)(.*)$/);
+      if (!match) return;
+      const name = match[2].replace(/\s+$/, "");
+      if (!name) return;
+      rows.push({ ws: match[1], name: name });
+    });
+    const spaceLengths = rows
+      .map((row) => (row.ws.indexOf("\t") >= 0 ? 0 : row.ws.length))
+      .filter((n) => n > 0);
+    const spaceUnit = detectTreeIndentUnit(spaceLengths);
+    const items = rows.map((row) => ({
+      depth: leadingTreeDepth(row.ws, spaceUnit),
+      name: row.name
+    }));
+    if (!items.length) return items;
+    const minDepth = Math.min.apply(
+      null,
+      items.map((item) => item.depth)
     );
+    items.forEach((item) => {
+      item.depth -= minDepth;
+    });
+    return items;
+  }
+
+  function isLastAtDepth(items, index, depth) {
+    for (let j = index + 1; j < items.length; j += 1) {
+      if (items[j].depth < depth) return true;
+      if (items[j].depth === depth) return false;
+    }
+    return true;
+  }
+
+  function renderUnicodeTree(text) {
+    const source = String(text || "");
+    if (/[│├└─┌┐┘]/.test(source)) {
+      return escapeHtml(source.replace(/\r\n/g, "\n").replace(/\s+$/, ""));
+    }
+    const items = parseTreeItems(source);
+    if (!items.length) return "";
+    return items
+      .map((item, index) => {
+        let prefix = "";
+        for (let level = 0; level < item.depth; level += 1) {
+          const last = isLastAtDepth(items, index, level + 1);
+          if (level === item.depth - 1) prefix += last ? "└── " : "├── ";
+          else prefix += last ? "     " : "│    ";
+        }
+        const isDir =
+          /\/$/.test(item.name) ||
+          (index + 1 < items.length && items[index + 1].depth > item.depth);
+        const nameClass = isDir ? "tree-dir" : "tree-file";
+        return (
+          `<span class="tree-line">` +
+          (prefix
+            ? `<span class="tree-guide">${escapeHtml(prefix)}</span>`
+            : "") +
+          `<span class="${nameClass}">${escapeHtml(item.name)}</span>` +
+          `</span>`
+        );
+      })
+      .join("\n");
+  }
+
+  function isTreeFence(lang) {
+    const normalized = String(lang || "").toLowerCase().trim().split(/\s+/)[0];
+    return (
+      normalized === "tree" ||
+      normalized === "filetree" ||
+      normalized === "files" ||
+      normalized === "dir"
+    );
+  }
+
+  function shouldHighlight(lang) {
+    const kind = fenceKind(lang);
+    return kind && kind !== "tree";
   }
 
   function diagramModeFromLang(lang) {
@@ -240,7 +467,10 @@ endmodule
         idPrefix: "doc-" + mode + "-" + diagramSerial
       });
       const errors = (drawn.diagnostics || []).filter((d) => d.severity === "error");
-      let html = `<div class="diagram">${drawn.svg}</div>`;
+      let html =
+        `<div class="diagram">` +
+        `<button type="button" class="blockio-grid-toggle" aria-pressed="false" title="Toggle routing grid">Grid</button>` +
+        `${drawn.svg}</div>`;
       if (errors.length) {
         html +=
           `<div class="diagram-error">` +
@@ -279,9 +509,13 @@ endmodule
         escaped = code.escaped;
       }
 
-      if (shouldHighlight(lang)) {
-        const highlighted = highlightSystemVerilog(text);
-        const langClass = escapeHtml(String(lang).split(/\s+/)[0] || "systemverilog");
+      if (isTreeFence(lang) || fenceKind(lang) === "tree") {
+        const tree = renderUnicodeTree(text);
+        return `<pre class="file-tree"><code class="language-tree">${tree}</code></pre>\n`;
+      }
+      const highlighted = highlightFence(lang, text);
+      if (highlighted != null) {
+        const langClass = escapeHtml(String(lang).split(/\s+/)[0] || "text");
         return `<pre><code class="language-${langClass}">${highlighted}</code></pre>\n`;
       }
       const diagramMode = diagramModeFromLang(lang);
@@ -321,7 +555,7 @@ endmodule
             part.startsWith("`")
               ? part
               : part.replace(
-                  /\[\[([A-Za-z_][A-Za-z0-9_$.\[\]:-]*)\]\]/g,
+                  /\[\[([A-Za-z0-9_][A-Za-z0-9_$.\[\]:-]*)\]\]/g,
                   '<span class="signal-name">$1</span>'
                 )
           )
@@ -779,6 +1013,14 @@ endmodule
             `\n\`\`\`systemverilog\n${selected.replace(/^\n+|\n+$/g, "")}\n\`\`\`\n`
         });
         break;
+      case "tree":
+        wrapOrInsert({
+          empty:
+            "\n```tree\nroot\n  dir1\n  dir2/\n    subdir1\n    subdir2\n```\n",
+          transformSelection: (selected) =>
+            `\n\`\`\`tree\n${selected.replace(/^\n+|\n+$/g, "")}\n\`\`\`\n`
+        });
+        break;
       case "signal":
         wrapOrInsert({
           empty: "[[signal_name]]",
@@ -856,15 +1098,31 @@ endmodule
     paintTableGrid(1, 1);
   }
 
+  function patchMarkdownSignalHighlight(mod) {
+    const src = mod && (mod.language ? mod : mod.default);
+    if (!src || !src.language || !src.language.tokenizer) return;
+
+    const language = Object.assign({}, src.language, {
+      tokenizer: Object.assign({}, src.language.tokenizer, {
+        linecontent: [
+          [/\[\[[A-Za-z0-9_][A-Za-z0-9_$.\[\]:-]*\]\]/, "variable.signal"],
+          ...(src.language.tokenizer.linecontent || [])
+        ]
+      })
+    });
+    monaco.languages.setMonarchTokensProvider("markdown", language);
+
+    const conf = Object.assign({}, src.conf || {});
+    conf.brackets = [["[[", "]]"]].concat(conf.brackets || []);
+    monaco.languages.setLanguageConfiguration("markdown", conf);
+  }
+
   function defineMonacoThemes() {
     monaco.editor.defineTheme("portable-dark", {
       base: "vs-dark",
       inherit: true,
       rules: [
-        { token: "comment", foreground: "7f93a8" },
-        { token: "string", foreground: "5eead4" },
-        { token: "keyword", foreground: "c45c6a" },
-        { token: "number", foreground: "93c5fd" }
+        { token: "variable.signal", foreground: "7dd3fc", fontStyle: "bold" }
       ],
       colors: {
         "editor.background": "#0d1620",
@@ -883,10 +1141,7 @@ endmodule
       base: "vs",
       inherit: true,
       rules: [
-        { token: "comment", foreground: "64748b" },
-        { token: "string", foreground: "0f766e" },
-        { token: "keyword", foreground: "9f1239" },
-        { token: "number", foreground: "1d4ed8" }
+        { token: "variable.signal", foreground: "0369a1", fontStyle: "bold" }
       ],
       colors: {
         "editor.background": "#f4f8fb",
@@ -978,12 +1233,26 @@ endmodule
       const vsPath = new URL("./vendor/monaco/vs", window.location.href).href.replace(/\/$/, "");
       require.config({ paths: { vs: vsPath } });
       require(["vs/editor/editor.main"], () => {
-        try {
-          createMonacoEditor();
-          resolve(window.monaco);
-        } catch (error) {
-          reject(error);
-        }
+        require(
+          ["vs/basic-languages/markdown/markdown"],
+          (markdownLang) => {
+            try {
+              patchMarkdownSignalHighlight(markdownLang);
+              createMonacoEditor();
+              resolve(window.monaco);
+            } catch (error) {
+              reject(error);
+            }
+          },
+          () => {
+            try {
+              createMonacoEditor();
+              resolve(window.monaco);
+            } catch (error) {
+              reject(error);
+            }
+          }
+        );
       }, reject);
     });
   }
@@ -1153,6 +1422,18 @@ endmodule
     });
 
     document.addEventListener("click", closeFloatingUi);
+
+    document.addEventListener("click", (event) => {
+      const toggle = event.target.closest(".blockio-grid-toggle");
+      if (!toggle) return;
+      const wrap = toggle.closest(".diagram");
+      const svg = wrap && wrap.querySelector("svg.blockio-diagram");
+      if (!svg) return;
+      const on = svg.getAttribute("data-blockio-grid") !== "on";
+      svg.setAttribute("data-blockio-grid", on ? "on" : "off");
+      toggle.classList.toggle("is-active", on);
+      toggle.setAttribute("aria-pressed", on ? "true" : "false");
+    });
 
     window.addEventListener("beforeunload", (event) => {
       if (!state.dirty) return;

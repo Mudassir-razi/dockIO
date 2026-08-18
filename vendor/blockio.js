@@ -33,6 +33,17 @@
     wire: true
   };
   
+  // All-caps special blocks. Not legal as a module type or instance name.
+  const SPECIAL_BLOCKS = {
+    AND: true,
+    OR: true,
+    NOT: true,
+    XOR: true,
+    CON: true,
+    MUX: true,
+    FLOP: true
+  };
+  
   const DIRECTIONS = { input: true, output: true, inout: true };
   
   const PORT_SKIP = {
@@ -86,14 +97,15 @@
     textH: 17,
     textPadX: 10,
     gapUnit: 36,
-    minJog: 20,
+    minJog: 28,
     wireClear: 2,
     channelMin: 28,
     trackPitch: 10,
     trackPad: 10,
     bendCost: 18,
     congestionCost: 12,
-    stubLen: 12,
+    stubLen: 28,
+    branchLabelPad: 26,
     stateW: 140,
     stateH: 48,
     diamond: 56,
@@ -114,6 +126,10 @@
   
   function isGateKind(name) {
     return Object.prototype.hasOwnProperty.call(GATE_KINDS, name);
+  }
+  
+  function isSpecialBlock(name) {
+    return !!(name && Object.prototype.hasOwnProperty.call(SPECIAL_BLOCKS, String(name).toUpperCase()));
   }
   
   function locFromToken(tok) {
@@ -157,6 +173,7 @@
       definitions: [],
       rows: [],
       states: [],
+      cons: [],
       gates: [],
       nets: [],
       reset: null
@@ -565,6 +582,10 @@
         error(message || "expected identifier", tok);
         return null;
       }
+      if (isSpecialBlock(tok.value)) {
+        error("'" + String(tok.value).toUpperCase() + "' is reserved and cannot be a type or instance name", tok);
+        return null;
+      }
       if (tok.type === "IDENT" || tok.type === "KEYWORD") return advance();
       error(message || "expected identifier", tok);
       return null;
@@ -830,6 +851,7 @@
           loc: locFromToken(strTok)
         };
       }
+      if (looksLikeCon()) return parseCon(false);
       return parseInstanceRef();
     }
   
@@ -1051,6 +1073,92 @@
       };
     }
   
+    function isConKeyword(tok) {
+      return !!(tok && (tok.type === "IDENT" || tok.type === "KEYWORD") && String(tok.value).toUpperCase() === "CON");
+    }
+  
+    function looksLikeCon() {
+      if (!isConKeyword(peek())) return false;
+      const second = peek(1);
+      return second && (second.type === "IDENT" || second.type === "KEYWORD");
+    }
+  
+    function parseCon(requireSemi) {
+      const start = advance();
+      const nameTok = parseName("expected CON instance name");
+      expect("LPAREN", "expected '(' after CON name");
+      let cond = "";
+      if (at("STRING")) {
+        const strTok = advance();
+        if (strTok.unclosed) error("unterminated string", strTok);
+        cond = strTok.value || "";
+      } else {
+        cond = parseExprUntil({ COMMA: true, RPAREN: true });
+      }
+      if (!String(cond || "").trim()) error("expected a condition in CON (...)", peek());
+      expect("COMMA", "expected ',' after CON condition");
+      const trueTok = parseName("expected true branch (state or CON name)");
+      expect("COMMA", "expected ',' after true branch");
+      const falseTok = parseName("expected false branch (state or CON name)");
+      expect("RPAREN", "expected ')' to close CON");
+      let semi = peek();
+      if (requireSemi) semi = expect("SEMI", "expected ';' after CON");
+      else semi = accept("SEMI") || peek();
+      if (!nameTok) return null;
+      return {
+        type: "con",
+        name: nameTok.value,
+        cond: String(cond || "").trim(),
+        whenTrue: trueTok ? trueTok.value : "",
+        whenFalse: falseTok ? falseTok.value : "",
+        loc: spanLoc(start, semi)
+      };
+    }
+  
+    function stmtHasExit(stmt) {
+      if (!stmt) return false;
+      if (stmt.type === "goto") return true;
+      if (stmt.type === "if") return stmtHasExit(stmt.consequent) || stmtHasExit(stmt.alternate);
+      if (stmt.type === "block") {
+        for (let i = 0; i < (stmt.body || []).length; i += 1) {
+          if (stmtHasExit(stmt.body[i])) return true;
+        }
+      }
+      return false;
+    }
+  
+    function autoConnectCons(rows, states) {
+      const byName = Object.create(null);
+      (states || []).forEach(function (st) {
+        if (st && st.name) byName[st.name] = st;
+      });
+      let nCols = 0;
+      (rows || []).forEach(function (row) {
+        nCols = Math.max(nCols, (row || []).length);
+      });
+      for (let c = 0; c < nCols; c += 1) {
+        let prev = null;
+        for (let r = 0; r < (rows || []).length; r += 1) {
+          const cell = rows[r] && rows[r][c];
+          let head = null;
+          if (cell && cell.type === "state") head = { type: "state", name: cell.name };
+          else if (cell && cell.type === "con") head = { type: "con", name: cell.name };
+          if (!head) continue;
+          if (prev && prev.type === "state" && head.type === "con") {
+            const st = byName[prev.name];
+            if (st && !(st.body || []).some(stmtHasExit)) {
+              st.body.push({
+                type: "goto",
+                target: head.name,
+                loc: cell.loc || st.loc
+              });
+            }
+          }
+          prev = head;
+        }
+      }
+    }
+  
     function parseState() {
       const start = advance();
       const nameTok = parseName("expected state name");
@@ -1157,6 +1265,7 @@
           return false;
         }
       }
+      if (isConKeyword(first)) return false;
       return second.type === "IDENT" || second.type === "KEYWORD";
     }
   
@@ -1194,6 +1303,7 @@
       if (!first || !second) return false;
       if (first.type !== "IDENT" && first.type !== "KEYWORD") return false;
       if (first.type === "KEYWORD" && isAsmControlKeyword(first.value)) return false;
+      if (isConKeyword(first)) return false;
       return second.type === "EQUALS" || second.type === "ARROW_LW";
     }
   
@@ -1201,6 +1311,7 @@
       const first = peek();
       if (!first || (first.type !== "IDENT" && first.type !== "KEYWORD")) return false;
       if (first.type === "KEYWORD" && isAsmControlKeyword(first.value)) return false;
+      if (isConKeyword(first)) return false;
       const second = peek(1);
       if (!second || second.type === "EOF" || second.type === "SEMI") return true;
       return (
@@ -1245,6 +1356,7 @@
       const rows = [];
       const buses = [];
       const states = [];
+      const cons = [];
       const gates = [];
       const nets = [];
       const assigns = [];
@@ -1254,8 +1366,28 @@
       while (!at("EOF") && !keyword(untilKeyword)) {
         const here = pos;
         if (at("LBRACK")) {
-          lastState = null;
-          rows.push(parseRow());
+          const row = parseRow();
+          const out = [];
+          let sawState = false;
+          (row || []).forEach(function (cell) {
+            if (cell && cell.type === "con") {
+              markAsm(cell);
+              cons.push(cell);
+              lastState = null;
+              out.push({ type: "con", name: cell.name, loc: cell.loc });
+            } else if (cell && cell.type === "instance" && instanceIsState(cell)) {
+              markAsm(cell);
+              const st = instanceToState(cell);
+              states.push(st);
+              lastState = st;
+              sawState = true;
+              out.push({ type: "state", name: st.name, loc: st.loc });
+            } else {
+              out.push(cell);
+            }
+          });
+          if (!sawState) lastState = null;
+          rows.push(out);
         } else if (at("HASH")) rows.push([parseGap()]);
         else if (at("STRING")) {
           const loneText = parseRowCell();
@@ -1285,6 +1417,14 @@
           if (ast.mode !== "circuit") warning("gate instances are a circuit-mode construct", peek());
           const gate = parseGate();
           if (gate) gates.push(gate);
+        } else if (looksLikeCon()) {
+          markAsm(peek());
+          const con = parseCon(true);
+          if (con) {
+            cons.push(con);
+            lastState = null;
+            rows.push([{ type: "con", name: con.name, loc: con.loc }]);
+          }
         } else if (looksLikeInstance()) {
           const lone = parseInstanceRef();
           accept("SEMI");
@@ -1293,6 +1433,7 @@
             const st = instanceToState(lone);
             states.push(st);
             lastState = st;
+            rows.push([{ type: "state", name: st.name, loc: st.loc }]);
           } else if (lone) {
             lastState = null;
             rows.push([lone]);
@@ -1316,10 +1457,12 @@
         }
         if (pos === here) break;
       }
+      autoConnectCons(rows, states);
       return {
         rows: rows,
         buses: buses,
         states: states,
+        cons: cons,
         gates: gates,
         nets: nets,
         assigns: assigns,
@@ -1348,6 +1491,7 @@
         rows: [],
         buses: [],
         states: [],
+        cons: [],
         gates: [],
         nets: [],
         assigns: [],
@@ -1366,6 +1510,7 @@
         keyword("reset") ||
         keyword("if") ||
         looksLikeAssign() ||
+        looksLikeCon() ||
         looksLikeInstance() ||
         looksLikeGate()
       ) {
@@ -1382,6 +1527,7 @@
         rows: body.rows,
         buses: body.buses,
         states: body.states,
+        cons: body.cons || [],
         gates: body.gates,
         nets: body.nets,
         assigns: body.assigns || [],
@@ -1406,6 +1552,7 @@
         rows: body.rows,
         buses: body.buses,
         states: body.states,
+        cons: body.cons || [],
         gates: body.gates,
         nets: body.nets,
         flow: body.flow,
@@ -1619,7 +1766,29 @@
       return states;
     }
   
-    function pushAsmTop(states, loc) {
+    function collectAsmCons() {
+      const cons = [];
+      const seen = Object.create(null);
+      function add(con) {
+        if (!con || !con.name) return;
+        if (seen[con.name]) {
+          diagnostics.push(diagnostic("error", "duplicate CON '" + con.name + "'", con.loc));
+          return;
+        }
+        seen[con.name] = true;
+        cons.push(con);
+      }
+      if (initials[0] && initials[0].cons) {
+        initials[0].cons.forEach(add);
+      } else {
+        ast.definitions.forEach(function (def) {
+          (def.cons || []).forEach(add);
+        });
+      }
+      return cons;
+    }
+  
+    function pushAsmTop(states, loc, rows, cons) {
       const synthetic = {
         type: "module",
         name: "top",
@@ -1629,6 +1798,7 @@
         rows: [],
         buses: [],
         states: states,
+        cons: cons || [],
         gates: [],
         nets: [],
         children: [],
@@ -1636,8 +1806,19 @@
         loc: loc || locFromToken(null)
       };
       ast.modules.push(synthetic);
-      ast.rows = [[synthetic]];
       ast.states = states;
+      ast.cons = cons || [];
+      const hasLayout = (rows || []).some(function (row) {
+        return (row || []).some(function (cell) {
+          return cell && (cell.type === "state" || cell.type === "con" || cell.type === "gap" || cell.type === "instance");
+        });
+      });
+      ast.asmRows = hasLayout
+        ? rows
+        : (states || []).map(function (st) {
+            return [{ type: "state", name: st.name, loc: st.loc }];
+          });
+      ast.rows = ast.asmRows;
     }
   
     if (ast.mode === "block") {
@@ -1682,11 +1863,17 @@
           if (def.reset && !ast.reset) ast.reset = def.reset;
         });
       }
+      const cons = collectAsmCons();
       if (states.length) {
-        pushAsmTop(states, states[0].loc);
+        cons.forEach(function (con) {
+          if (states.some(function (st) { return st.name === con.name; })) {
+            diagnostics.push(diagnostic("error", "CON '" + con.name + "' collides with a state name", con.loc));
+          }
+        });
+        pushAsmTop(states, states[0].loc, initials[0] && initials[0].rows, cons);
       } else if (ast.looseStates && ast.looseStates.length) {
         ast.looseStates.forEach(mergeStateDefaults);
-        pushAsmTop(ast.looseStates, ast.looseStates[0].loc);
+        pushAsmTop(ast.looseStates, ast.looseStates[0].loc, null, cons);
       }
       if (initials.length) {
         (initials[0].buses || []).forEach(function (bus) {
@@ -2255,6 +2442,127 @@
   function layoutRowGrid(rowBoxes) {
     return layoutCells(rowBoxes, { route: false, center: true, channelMin: LAYOUT.innerGap });
   }
+  
+  // One tessellated mesh for a grid level: channel strips AND content cells
+  // share the same lines, so the overlay is a single solid grid instead of a
+  // stack of per-row rectangles that overlap.
+  function gridMesh(grid, origin) {
+    const ox = (origin && origin.x) || 0;
+    const oy = (origin && origin.y) || 0;
+    const xs = [];
+    const ys = [];
+    function uniquePush(out, v) {
+      const last = out.length ? out[out.length - 1] : null;
+      if (last != null && Math.abs(last - v) < 0.51) return;
+      out.push(v);
+    }
+    if (!grid) {
+      return { xs: xs, ys: ys, cells: [], x0: ox, y0: oy, x1: ox, y1: oy };
+    }
+    let x = ox;
+    uniquePush(xs, x);
+    for (let i = 0; i < (grid.vSizes || []).length; i += 1) {
+      x += grid.vSizes[i] || 0;
+      uniquePush(xs, x);
+      if (i < grid.nCols) {
+        x += grid.colW[i] || 0;
+        uniquePush(xs, x);
+      }
+    }
+    let y = oy;
+    uniquePush(ys, y);
+    for (let j = 0; j < (grid.hSizes || []).length; j += 1) {
+      y += grid.hSizes[j] || 0;
+      uniquePush(ys, y);
+      if (j < grid.nRows) {
+        y += grid.rowH[j] || 0;
+        uniquePush(ys, y);
+      }
+    }
+    const cells = [];
+    for (let r = 0; r < ys.length - 1; r += 1) {
+      for (let c = 0; c < xs.length - 1; c += 1) {
+        cells.push({
+          x: xs[c],
+          y: ys[r],
+          w: xs[c + 1] - xs[c],
+          h: ys[r + 1] - ys[r],
+          row: r,
+          col: c
+        });
+      }
+    }
+    return {
+      xs: xs,
+      ys: ys,
+      cells: cells,
+      x0: xs[0] || ox,
+      y0: ys[0] || oy,
+      x1: xs[xs.length - 1] || ox,
+      y1: ys[ys.length - 1] || oy
+    };
+  }
+  
+  function gridCellRects(grid, origin) {
+    return gridMesh(grid, origin).cells;
+  }
+  
+  function gridBoundaryLines(grid, origin) {
+    const mesh = gridMesh(grid, origin);
+    return { xs: mesh.xs, ys: mesh.ys };
+  }
+  
+  function gridLevel(grid, origin, clip, depth) {
+    const mesh = gridMesh(grid, origin);
+    const bounds = {
+      x: mesh.x0,
+      y: mesh.y0,
+      w: Math.max(0, mesh.x1 - mesh.x0),
+      h: Math.max(0, mesh.y1 - mesh.y0)
+    };
+    return {
+      depth: depth || 0,
+      clip: clip || bounds,
+      cells: mesh.cells,
+      xs: mesh.xs,
+      ys: mesh.ys
+    };
+  }
+  
+  function hasBlockChildren(box) {
+    return (box.childBoxes || []).some(function (c) {
+      return c && !c.empty && !c.textOnly && !c.gap;
+    });
+  }
+  
+  // Hierarchical debug grid: one universal tessellation for this level, then a
+  // nested tessellation clipped to each container's inner cell. Levels never
+  // share lines, so they cannot overlap.
+  function collectGridLevels(rootBoxes, rootGrid, origin) {
+    const levels = [gridLevel(rootGrid, origin, null, 0)];
+    function recurse(box, depth) {
+      if (box && box.nested && box.innerGrid && hasBlockChildren(box)) {
+        const contentOrigin = {
+          x: box.x + (box.innerPad || 0),
+          y: box.y + (box.headerH || 0) + (box.innerPad || 0)
+        };
+        const clip = {
+          x: contentOrigin.x,
+          y: contentOrigin.y,
+          w: box.innerGrid.width || 0,
+          h: box.innerGrid.height || 0
+        };
+        levels.push(gridLevel(box.innerGrid, contentOrigin, clip, depth));
+      }
+      (box.childBoxes || []).forEach(function (child) {
+        recurse(child, depth + 1);
+      });
+    }
+    (rootBoxes || []).forEach(function (box) {
+      recurse(box, 1);
+    });
+    return levels;
+  }
 
   /* ---- layout/measure.js ---- */
   function textWidth(text, size) {
@@ -2275,6 +2583,26 @@
   
   function portCaption(port) {
     return port ? port.name : "";
+  }
+  
+  function diamondFontSize(text, width, height) {
+    const s = Math.min(width || 0, height || 0);
+    if (s <= 0) return 9;
+    let fs = 11;
+    while (fs > 6.5) {
+      const usable = s - fs - 8;
+      if (usable > 0 && textWidth(text, fs) <= usable) return fs;
+      fs -= 0.5;
+    }
+    return 6.5;
+  }
+  
+  function diamondBoxSize(text) {
+    const label = String(text || "");
+    const minFs = 6.5;
+    let s = Math.max(LAYOUT.diamond, textWidth(label, minFs) + minFs + 10);
+    s = Math.ceil(s / 2) * 2;
+    return { width: s, height: s, leftExtent: 0, rightExtent: 0 };
   }
 
   /* ---- layout/ports.js ---- */
@@ -2392,11 +2720,14 @@
   function attachPorts(box, x, y) {
     box.x = x;
     box.y = y;
-    const portOrigin = y + (box.height - (box.portH || 0)) / 2;
-    box.leftPorts = flattenPorts(box.left || emptySide(), portOrigin);
-    box.rightPorts = flattenPorts(box.right || emptySide(), portOrigin);
-    box.leftGroups = collectGroups(box.left || emptySide(), portOrigin);
-    box.rightGroups = collectGroups(box.right || emptySide(), portOrigin);
+    const left = box.left || emptySide();
+    const right = box.right || emptySide();
+    const leftOrigin = y + (box.height - (left.height || 0)) / 2;
+    const rightOrigin = y + (box.height - (right.height || 0)) / 2;
+    box.leftPorts = flattenPorts(left, leftOrigin);
+    box.rightPorts = flattenPorts(right, rightOrigin);
+    box.leftGroups = collectGroups(left, leftOrigin);
+    box.rightGroups = collectGroups(right, rightOrigin);
     (box.childBoxes || []).forEach(function (child) {
       if (child.empty) return;
       attachPorts(child, x + box.innerPad + (child.relX || 0), y + box.headerH + box.innerPad + (child.relY || 0));
@@ -2452,9 +2783,11 @@
   }
   
   function trackOffset(track, count, pitch) {
-    const n = Math.max(1, count || 1);
     const p = pitch || LAYOUT.trackPitch;
-    return (track - (n - 1) / 2) * p;
+    const t = track || 0;
+    if (t === 0) return 0;
+    const k = Math.ceil(t / 2);
+    return (t % 2 === 1 ? 1 : -1) * k * p;
   }
 
   /* ---- route/highway.js ---- */
@@ -2549,6 +2882,15 @@
     return { x: box.x + box.width * u, y: box.y + box.height, dir: "bottom" };
   }
   
+  function diamondVertex(box, side) {
+    const cx = box.x + box.width / 2;
+    const cy = box.y + box.height / 2;
+    if (side === "left") return { x: box.x, y: cy, dir: "left" };
+    if (side === "right") return { x: box.x + box.width, y: cy, dir: "right" };
+    if (side === "top") return { x: cx, y: box.y, dir: "top" };
+    return { x: cx, y: box.y + box.height, dir: "bottom" };
+  }
+  
   function stubTowardHighway(pt) {
     const stub = LAYOUT.stubLen;
     if (pt.dir === "left") return { x: pt.x - stub, y: pt.y };
@@ -2562,7 +2904,123 @@
     return Math.abs(a - b) <= (tol == null ? 0.51 : tol);
   }
   
+  function isDiamond(box) {
+    return !!(box && box.kind === "diamond");
+  }
+  
+  function attachPoint(box, side, t) {
+    if (isDiamond(box)) return diamondVertex(box, side);
+    return edgePoint(box, side, t);
+  }
+  
+  function portsOnSide(box, side) {
+    if (!box) return [];
+    if (side === "left") return box.leftPorts || [];
+    if (side === "right") return box.rightPorts || [];
+    return [];
+  }
+  
+  function choosePort(box, side, hint, used, wide) {
+    if (!box || isDiamond(box) || box.textOnly) return null;
+    const list = portsOnSide(box, side);
+    if (!list.length) return null;
+    function free(port) {
+      const name = port && port.port && port.port.name;
+      if (!name) return true;
+      return !used[box.id + ":" + name];
+    }
+    if (hint) {
+      const named = list.find(function (p) {
+        return p.port && p.port.name === hint;
+      });
+      if (named) return named;
+    }
+    if (wide) {
+      const fat = list.find(function (p) {
+        return p.port && p.port.width > 1 && free(p);
+      });
+      if (fat) return fat;
+    }
+    return list.find(free) || list[0];
+  }
+  
+  function attachFromChoice(box, side, port, t, yLock) {
+    if (isDiamond(box)) return attachPoint(box, side, t);
+    if (port && (side === "left" || side === "right")) {
+      return {
+        x: side === "left" ? box.x : box.x + box.width,
+        y: port.y,
+        dir: side
+      };
+    }
+    if (yLock != null && (side === "left" || side === "right") && box.height > 0) {
+      const inset = Math.min(8, Math.max(2, box.height / 4));
+      const y = Math.max(box.y + inset, Math.min(box.y + box.height - inset, yLock));
+      return {
+        x: side === "left" ? box.x : box.x + box.width,
+        y: y,
+        dir: side
+      };
+    }
+    return attachPoint(box, side, t);
+  }
+  
+  function markWired(box, port, used) {
+    if (!box || !port || !port.port) return;
+    port.wired = true;
+    used[box.id + ":" + port.port.name] = true;
+  }
+  
+  // ASM diamonds: one input vertex (top) and two outputs on the remaining
+  // three vertices (left, right, bottom). Input and output never share a vertex.
+  function diamondExitSide(source, target, bus) {
+    if (target.y >= source.y + source.height - 2) return "bottom";
+    const sx = source.x + source.width / 2;
+    const tx = target.x + target.width / 2;
+    if (tx > sx + 8) return "right";
+    if (tx < sx - 8) return "left";
+    return bus && String(bus.name) === "1" ? "right" : "left";
+  }
+  
+  function diamondForcedPair(source, target, bus) {
+    if (!isDiamond(source) && !isDiamond(target)) return null;
+    let d1;
+    let d2;
+    if (isDiamond(source)) {
+      d1 = diamondExitSide(source, target, bus);
+    } else if (isDiamond(target) && target.y >= source.y + source.height - 2) {
+      d1 = "bottom";
+    } else {
+      d1 = preferSides(source, target)[0];
+      if (d1 === "top") d1 = "bottom";
+    }
+    if (isDiamond(target)) {
+      d2 = "top";
+    } else if (isDiamond(source) && target.y + target.height <= source.y + 2) {
+      d2 = d1;
+    } else if (isDiamond(source) && d1 === "bottom") {
+      d2 = "top";
+    } else {
+      d2 = preferSides(source, target)[1];
+    }
+    if (isDiamond(source) && d1 === "top") d1 = "left";
+    if (isDiamond(target) && d2 !== "top") d2 = "top";
+    return [d1, d2];
+  }
+  
+  function diamondSidePairs(source, target, bus) {
+    const forced = diamondForcedPair(source, target, bus);
+    if (!forced) return null;
+    const pairs = [forced];
+    if (isDiamond(source) && (forced[0] === "left" || forced[0] === "right")) {
+      const other = forced[0] === "left" ? "right" : "left";
+      pairs.push([other, isDiamond(target) ? "top" : other]);
+    }
+    return pairs;
+  }
+  
   function preferSides(source, target) {
+    if (source === target) return ["right", "right"];
     const sx = source.x + source.width / 2;
     const sy = source.y + source.height / 2;
     const tx = target.x + target.width / 2;
@@ -2614,8 +3072,8 @@
   }
   
   function segmentHits(a, b, box, pad) {
-    if (!box || box.empty || box.textOnly) return false;
-    const p = pad == null ? -LAYOUT.wireClear : pad;
+    if (!box || box.empty || box.textOnly || box.gap) return false;
+    const p = pad == null ? 0.5 : pad;
     const r = { x: box.x + p, y: box.y + p, width: box.width - p * 2, height: box.height - p * 2 };
     if (r.width <= 0 || r.height <= 0) return false;
     const minx = Math.min(a.x, b.x);
@@ -2632,15 +3090,170 @@
     return true;
   }
   
+  function containsBox(outer, inner) {
+    if (!outer || !inner || outer === inner) return false;
+    return (
+      inner.x >= outer.x - 0.5 &&
+      inner.y >= outer.y - 0.5 &&
+      inner.x + inner.width <= outer.x + outer.width + 0.5 &&
+      inner.y + inner.height <= outer.y + outer.height + 0.5
+    );
+  }
+  
+  function routingObstacles(boxes, source, target) {
+    return (boxes || []).filter(function (box) {
+      if (!box || box.empty || box.textOnly || box.gap) return false;
+      if (box === source || box === target) return false;
+      if (source && target && containsBox(box, source) && containsBox(box, target)) return false;
+      if (source && containsBox(source, box)) return false;
+      if (target && containsBox(target, box)) return false;
+      return true;
+    });
+  }
+  
   function pathHitsBoxes(pts, boxes, source, target) {
+    const obstacles = routingObstacles(boxes, source, target);
     for (let i = 1; i < pts.length; i += 1) {
-      for (let j = 0; j < boxes.length; j += 1) {
-        const box = boxes[j];
-        if (box === source || box === target) continue;
-        if (segmentHits(pts[i - 1], pts[i], box)) return true;
+      for (let j = 0; j < obstacles.length; j += 1) {
+        if (segmentHits(pts[i - 1], pts[i], obstacles[j])) return true;
       }
     }
     return false;
+  }
+  
+  function overlapRange(a0, a1, b0, b1) {
+    const lo = Math.max(a0, b0);
+    const hi = Math.min(a1, b1);
+    return hi - lo > 2 ? { lo: lo, hi: hi } : null;
+  }
+  
+  function intervalsOverlap(a0, a1, b0, b1) {
+    const aLo = Math.min(a0, a1);
+    const aHi = Math.max(a0, a1);
+    const bLo = Math.min(b0, b1);
+    const bHi = Math.max(b0, b1);
+    return Math.min(aHi, bHi) - Math.max(aLo, bLo) > 2;
+  }
+  
+  // If two boxes share a facing projection, a single orthogonal segment is the
+  // whole route. Using each box's own center (t=0.5 of different widths) used
+  // to create a tiny L/Z even when a straight line was already clear.
+  function alignedStraight(source, target, t) {
+    if (!source || !target || source === target) return null;
+    const u = t == null ? 0.5 : t;
+    const xOv = overlapRange(source.x, source.x + source.width, target.x, target.x + target.width);
+    const yOv = overlapRange(source.y, source.y + source.height, target.y, target.y + target.height);
+    if (xOv && !yOv) {
+      const x = xOv.lo + (xOv.hi - xOv.lo) * u;
+      if (target.y >= source.y + source.height - 0.5) {
+        return {
+          points: [
+            { x: x, y: source.y + source.height },
+            { x: x, y: target.y }
+          ],
+          dir1: "bottom",
+          dir2: "top"
+        };
+      }
+      if (source.y >= target.y + target.height - 0.5) {
+        if (isDiamond(source)) return null;
+        return {
+          points: [
+            { x: x, y: source.y },
+            { x: x, y: target.y + target.height }
+          ],
+          dir1: "top",
+          dir2: "bottom"
+        };
+      }
+    }
+    if (yOv && !xOv) {
+      const y = yOv.lo + (yOv.hi - yOv.lo) * u;
+      if (target.x >= source.x + source.width - 0.5) {
+        return {
+          points: [
+            { x: source.x + source.width, y: y },
+            { x: target.x, y: y }
+          ],
+          dir1: "right",
+          dir2: "left"
+        };
+      }
+      if (source.x >= target.x + target.width - 0.5) {
+        return {
+          points: [
+            { x: source.x, y: y },
+            { x: target.x + target.width, y: y }
+          ],
+          dir1: "left",
+          dir2: "right"
+        };
+      }
+    }
+    return null;
+  }
+  
+  function routeOverlapsOthers(route, routes, pts) {
+    for (let r = 0; r < (routes || []).length; r += 1) {
+      const other = routes[r];
+      if (!other || other === route) continue;
+      const q = other.points;
+      if (!q || q.length < 2) continue;
+      for (let j = 1; j < q.length; j += 1) {
+        const c = q[j - 1];
+        const d = q[j];
+        for (let k = 1; k < pts.length; k += 1) {
+          const a = pts[k - 1];
+          const b = pts[k];
+          if (approx(a.y, b.y) && approx(c.y, d.y) && approx(a.y, c.y)) {
+            if (intervalsOverlap(a.x, b.x, c.x, d.x)) return true;
+          } else if (approx(a.x, b.x) && approx(c.x, d.x) && approx(a.x, c.x)) {
+            if (intervalsOverlap(a.y, b.y, c.y, d.y)) return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+  
+  function collapseStraight(routes, boxes) {
+    (routes || []).forEach(function (route) {
+      const pts = route.points;
+      if (!pts || pts.length < 3) return;
+      const a = pts[0];
+      const b = pts[pts.length - 1];
+      let straight = null;
+      if (approx(a.x, b.x, 8)) {
+        const x = approx(a.x, b.x) ? a.x : (a.x + b.x) / 2;
+        straight = [
+          { x: x, y: a.y },
+          { x: x, y: b.y }
+        ];
+      } else if (approx(a.y, b.y, 8)) {
+        const y = approx(a.y, b.y) ? a.y : (a.y + b.y) / 2;
+        straight = [
+          { x: a.x, y: y },
+          { x: b.x, y: y }
+        ];
+      }
+      if (!straight) return;
+      if (isDiamond(route.source) && approx(straight[0].y, route.source.y) && approx(straight[0].x, route.source.x + route.source.width / 2)) {
+        return;
+      }
+      if (isDiamond(route.target) && !(approx(straight[1].y, route.target.y) && approx(straight[1].x, route.target.x + route.target.width / 2))) {
+        return;
+      }
+      if (pathHitsBoxes(straight, boxes, route.source, route.target)) return;
+      if (routeOverlapsOthers(route, routes, straight)) return;
+      route.points = straight;
+      if (approx(straight[0].x, straight[1].x)) {
+        route.dir1 = straight[1].y >= straight[0].y ? "bottom" : "top";
+        route.dir2 = straight[1].y >= straight[0].y ? "top" : "bottom";
+      } else {
+        route.dir1 = straight[1].x >= straight[0].x ? "right" : "left";
+        route.dir2 = straight[1].x >= straight[0].x ? "left" : "right";
+      }
+    });
   }
   
   function uniqueSorted(values) {
@@ -2686,23 +3299,35 @@
     const ys = [];
     const ox = (origin && origin.x) || LAYOUT.pagePad;
     const oy = (origin && origin.y) || LAYOUT.pagePad;
-    xs.push(ox - LAYOUT.channelMin / 2);
-    ys.push(oy - LAYOUT.channelMin / 2);
+    const clear = LAYOUT.channelMin;
+    let minX = ox;
+    let minY = oy;
+    let maxX = ox;
+    let maxY = oy;
+    xs.push(ox - clear / 2);
+    ys.push(oy - clear / 2);
     (boxes || []).forEach(function (box) {
-      if (!box || box.empty || box.textOnly) return;
+      if (!box || box.empty || box.textOnly || box.gap) return;
       const cell = box.cellAbs;
-      if (cell) {
-        xs.push(cell.x - LAYOUT.channelMin / 2);
-        xs.push(cell.x + cell.w + LAYOUT.channelMin / 2);
-        ys.push(cell.y - LAYOUT.channelMin / 2);
-        ys.push(cell.y + cell.h + LAYOUT.channelMin / 2);
-      } else {
-        xs.push(box.x - LAYOUT.channelMin / 2);
-        xs.push(box.x + box.width + LAYOUT.channelMin / 2);
-        ys.push(box.y - LAYOUT.channelMin / 2);
-        ys.push(box.y + box.height + LAYOUT.channelMin / 2);
-      }
+      const left = cell ? cell.x : box.x;
+      const top = cell ? cell.y : box.y;
+      const right = cell ? cell.x + cell.w : box.x + box.width;
+      const bottom = cell ? cell.y + cell.h : box.y + box.height;
+      xs.push(left - clear / 2);
+      xs.push(right + clear / 2);
+      ys.push(top - clear / 2);
+      ys.push(bottom + clear / 2);
+      minX = Math.min(minX, left);
+      minY = Math.min(minY, top);
+      maxX = Math.max(maxX, right);
+      maxY = Math.max(maxY, bottom);
     });
+    xs.push(minX - clear * 1.5);
+    xs.push(minX - clear * 2.6);
+    xs.push(maxX + clear * 1.5);
+    xs.push(maxX + clear * 2.6);
+    ys.push(minY - clear * 1.5);
+    ys.push(maxY + clear * 1.5);
     return { xs: uniqueSorted(xs), ys: uniqueSorted(ys) };
   }
   
@@ -2711,6 +3336,34 @@
       xs: uniqueSorted((a.xs || []).concat(b.xs || [])),
       ys: uniqueSorted((a.ys || []).concat(b.ys || []))
     };
+  }
+  
+  // Sparse routing highways: the cell-edge channels of this grid level only.
+  // Mixing in per-box geometry used to densify the lattice so wires stair-stepped
+  // through every nested edge. Nested buses still work because ancestors that
+  // contain both endpoints are not obstacles.
+  function routeChannels(boxes, origin, grid) {
+    const fromGrid = gridChannels(grid, origin);
+    if ((fromGrid.xs && fromGrid.xs.length) || (fromGrid.ys && fromGrid.ys.length)) {
+      return fromGrid;
+    }
+    const obstacles = (boxes || []).filter(function (b) {
+      return b && !b.empty && !b.textOnly && !b.gap;
+    });
+    return geometryChannels(obstacles, origin);
+  }
+  
+  function outerValues(values, count) {
+    const list = values || [];
+    if (!list.length) return [];
+    const n = Math.max(1, count || 2);
+    const out = [];
+    for (let i = 0; i < n && i < list.length; i += 1) out.push(list[i]);
+    for (let j = 0; j < n && j < list.length; j += 1) {
+      const v = list[list.length - 1 - j];
+      if (out.indexOf(v) < 0) out.push(v);
+    }
+    return out;
   }
   
   function candidatesFor(p1, p2, channels) {
@@ -2727,27 +3380,398 @@
     (channels.xs || []).forEach(function (x) {
       add([p1, { x: x, y: p1.y }, { x: x, y: p2.y }, p2]);
     });
+    const xs = outerValues(channels.xs, 2);
+    const ys = outerValues(channels.ys, 2);
+    xs.forEach(function (x) {
+      ys.forEach(function (y) {
+        add([p1, { x: p1.x, y: y }, { x: x, y: y }, { x: x, y: p2.y }, p2]);
+        add([p1, { x: x, y: p1.y }, { x: x, y: y }, { x: p2.x, y: y }, p2]);
+      });
+    });
     return out;
   }
   
-  function scorePath(pts) {
-    return pathTurns(pts) * 1000000 + pathLength(pts);
+  function channelKey(a, b) {
+    if (approx(a.y, b.y) && !approx(a.x, b.x)) return "h:" + round(a.y);
+    if (approx(a.x, b.x) && !approx(a.y, b.y)) return "v:" + round(a.x);
+    return null;
   }
   
-  function minTurnPath(p1, p2, boxes, source, target, channels) {
+  function usageCost(pts, usage) {
+    const used = usage || Object.create(null);
+    let cost = 0;
+    for (let i = 1; i < (pts || []).length; i += 1) {
+      const key = channelKey(pts[i - 1], pts[i]);
+      if (key) cost += (used[key] || 0) * 400;
+    }
+    return cost;
+  }
+  
+  function scorePath(pts, usage) {
+    return pathTurns(pts) * 1000000 + usageCost(pts, usage) + pathLength(pts) + Math.max(0, pts.length - 2) * 25;
+  }
+  
+  function orthoCands(a, b) {
+    if (approx(a.x, b.x) || approx(a.y, b.y)) return [[a, b]];
+    return [
+      [a, { x: b.x, y: a.y }, b],
+      [a, { x: a.x, y: b.y }, b]
+    ];
+  }
+  
+  // Collapse staircases: replace any interior span with a straight or L-shape
+  // whenever that shortcut still clears obstacles. Greedy farthest-first so a
+  // single pass prefers the longest clean jump (fewest turns).
+  function polishPath(pts, boxes, source, target) {
+    if (!pts || pts.length < 3) return pts || [];
+    let cur = simplify(pts);
+    const out = [cur[0]];
+    let i = 0;
+    while (i < cur.length - 1) {
+      let picked = null;
+      let pickedJ = i + 1;
+      for (let j = cur.length - 1; j > i; j -= 1) {
+        const cands = orthoCands(cur[i], cur[j]);
+        let ok = null;
+        for (let c = 0; c < cands.length; c += 1) {
+          if (!pathHitsBoxes(cands[c], boxes, source, target)) {
+            ok = cands[c];
+            break;
+          }
+        }
+        if (ok) {
+          picked = ok;
+          pickedJ = j;
+          break;
+        }
+      }
+      if (picked) {
+        for (let k = 1; k < picked.length; k += 1) out.push(picked[k]);
+        i = pickedJ;
+      } else {
+        out.push(cur[i + 1]);
+        i += 1;
+      }
+    }
+    return simplify(out);
+  }
+  
+  function normalDir(side) {
+    if (side === "right") return "R";
+    if (side === "left") return "L";
+    if (side === "top") return "U";
+    return "D";
+  }
+  
+  function approachDir(side) {
+    if (side === "left") return "R";
+    if (side === "right") return "L";
+    if (side === "top") return "D";
+    return "U";
+  }
+  
+  function axisH(d) {
+    return d === "R" || d === "L";
+  }
+  
+  // Orthogonal grid router over the channel "highways" that run along cell edges.
+  // It performs a turn-minimizing shortest-path search (Dijkstra over
+  // (grid-node, heading) states) so the wire takes the route with the fewest
+  // turning points first, then the least channel congestion, then the shortest
+  // length. This handles the hard cases (multi-bend detours, fully blocked lanes)
+  // that the quick candidate set in candidatesFor cannot express. The endpoints
+  // are forced to leave/enter their boxes along the chosen side normals, which
+  // keeps stubs perpendicular and avoids cutting through the source/target.
+  function gridPath(p1, p2, boxes, source, target, channels, usage) {
+    const xs = uniqueSorted((channels.xs || []).concat([p1.x, p2.x]));
+    const ys = uniqueSorted((channels.ys || []).concat([p1.y, p2.y]));
+    const nx = xs.length;
+    const ny = ys.length;
+    if (nx < 2 || ny < 2) return null;
+  
+    function findAxis(list, v) {
+      for (let i = 0; i < list.length; i += 1) {
+        if (approx(list[i], v)) return i;
+      }
+      return -1;
+    }
+    const sx = findAxis(xs, p1.x);
+    const sy = findAxis(ys, p1.y);
+    const tx = findAxis(xs, p2.x);
+    const ty = findAxis(ys, p2.y);
+    if (sx < 0 || sy < 0 || tx < 0 || ty < 0) return null;
+  
+    const obstacles = boxes || [];
+    function open(ax, ay, bx, by) {
+      const a = { x: ax, y: ay };
+      const b = { x: bx, y: by };
+      for (let k = 0; k < obstacles.length; k += 1) {
+        const box = obstacles[k];
+        if (box === source || box === target) continue;
+        if (segmentHits(a, b, box)) return false;
+      }
+      return true;
+    }
+  
+    const startNode = sx * ny + sy;
+    const firstDir = normalDir(p1.dir || "right");
+    const wantDir = approachDir(p2.dir || "left");
+    const DIRS = ["R", "L", "U", "D"];
+    const dirIndex = { R: 0, L: 1, U: 2, D: 3 };
+    const REV = { R: "L", L: "R", U: "D", D: "U" };
+    const stateCount = nx * ny * 4;
+    const dist = new Array(stateCount);
+    const prev = new Array(stateCount);
+    for (let i = 0; i < stateCount; i += 1) {
+      dist[i] = Infinity;
+      prev[i] = -1;
+    }
+  
+    const TURN = 1000000;
+    const CONG = 400;
+  
+    // Minimal binary heap keyed by (cost, stateId); the stateId tie-break keeps
+    // the search deterministic so repeated renders are byte-identical.
+    const heapCost = [];
+    const heapState = [];
+    function swap(i, j) {
+      const c = heapCost[i];
+      heapCost[i] = heapCost[j];
+      heapCost[j] = c;
+      const s = heapState[i];
+      heapState[i] = heapState[j];
+      heapState[j] = s;
+    }
+    function less(i, j) {
+      return heapCost[i] < heapCost[j] || (heapCost[i] === heapCost[j] && heapState[i] < heapState[j]);
+    }
+    function heapPush(cost, state) {
+      heapCost.push(cost);
+      heapState.push(state);
+      let i = heapCost.length - 1;
+      while (i > 0) {
+        const parent = (i - 1) >> 1;
+        if (!less(i, parent)) break;
+        swap(i, parent);
+        i = parent;
+      }
+    }
+    function heapPop() {
+      const topCost = heapCost[0];
+      const topState = heapState[0];
+      const lastCost = heapCost.pop();
+      const lastState = heapState.pop();
+      if (heapCost.length) {
+        heapCost[0] = lastCost;
+        heapState[0] = lastState;
+        let i = 0;
+        const n = heapCost.length;
+        while (true) {
+          const l = i * 2 + 1;
+          const r = l + 1;
+          let m = i;
+          if (l < n && less(l, m)) m = l;
+          if (r < n && less(r, m)) m = r;
+          if (m === i) break;
+          swap(i, m);
+          i = m;
+        }
+      }
+      return { cost: topCost, state: topState };
+    }
+  
+    const seed = startNode * 4 + dirIndex[firstDir];
+    dist[seed] = 0;
+    heapPush(0, seed);
+    const goalId = (tx * ny + ty) * 4 + dirIndex[wantDir];
+    let goalState = -1;
+  
+    while (heapCost.length) {
+      const top = heapPop();
+      const state = top.state;
+      if (top.cost > dist[state]) continue;
+      if (state === goalId) {
+        goalState = state;
+        break;
+      }
+      const node = Math.floor(state / 4);
+      const dir = DIRS[state % 4];
+      const ix = Math.floor(node / ny);
+      const iy = node % ny;
+      for (let di = 0; di < 4; di += 1) {
+        const nd = DIRS[di];
+        if (node === startNode && nd !== firstDir) continue;
+        if (nd === REV[dir] && node !== startNode) continue;
+        let jx = ix;
+        let jy = iy;
+        if (nd === "R") jx = ix + 1;
+        else if (nd === "L") jx = ix - 1;
+        else if (nd === "D") jy = iy + 1;
+        else jy = iy - 1;
+        if (jx < 0 || jx >= nx || jy < 0 || jy >= ny) continue;
+        const ax = xs[ix];
+        const ay = ys[iy];
+        const bx = xs[jx];
+        const by = ys[jy];
+        if (!open(ax, ay, bx, by)) continue;
+        const len = Math.abs(bx - ax) + Math.abs(by - ay);
+        const turn = axisH(nd) === axisH(dir) ? 0 : TURN;
+        const key = axisH(nd) ? "h:" + round(ay) : "v:" + round(ax);
+        const cong = (usage && usage[key] ? usage[key] : 0) * CONG;
+        const nextState = (jx * ny + jy) * 4 + di;
+        const cost = top.cost + len + turn + cong;
+        if (cost < dist[nextState]) {
+          dist[nextState] = cost;
+          prev[nextState] = state;
+          heapPush(cost, nextState);
+        }
+      }
+    }
+  
+    if (goalState < 0) return null;
+    const pts = [];
+    let cur = goalState;
+    while (cur >= 0) {
+      const node = Math.floor(cur / 4);
+      const ix = Math.floor(node / ny);
+      const iy = node % ny;
+      pts.push({ x: xs[ix], y: ys[iy] });
+      cur = prev[cur];
+    }
+    pts.reverse();
+    if (pts.length < 2) return null;
+    return simplify(pts);
+  }
+  
+  function minTurnPath(p1, p2, boxes, source, target, channels, usage) {
     const cands = candidatesFor(p1, p2, channels);
     let best = null;
     let bestScore = Infinity;
     cands.forEach(function (pts) {
       if (!pts || pts.length < 2) return;
-      if (pathHitsBoxes(pts, boxes, source, target)) return;
-      const score = scorePath(pts);
+      const polished = polishPath(pts, boxes, source, target);
+      if (pathHitsBoxes(polished, boxes, source, target)) return;
+      const score = scorePath(polished, usage);
       if (score < bestScore) {
         bestScore = score;
-        best = pts;
+        best = polished;
       }
     });
+    if (!best || pathTurns(best) >= 2) {
+      const g = gridPath(p1, p2, boxes, source, target, channels, usage);
+      if (g && g.length >= 2) {
+        const polished = polishPath(g, boxes, source, target);
+        if (!pathHitsBoxes(polished, boxes, source, target)) {
+          const gs = scorePath(polished, usage);
+          if (gs < bestScore) {
+            best = polished;
+            bestScore = gs;
+          }
+        }
+      }
+    }
     return best;
+  }
+  
+  function addUsage(pts, usage) {
+    for (let i = 1; i < (pts || []).length; i += 1) {
+      const key = channelKey(pts[i - 1], pts[i]);
+      if (!key) continue;
+      usage[key] = (usage[key] || 0) + 1;
+    }
+  }
+  
+  function outwardDelta(side, len) {
+    if (side === "left") return { x: -len, y: 0 };
+    if (side === "right") return { x: len, y: 0 };
+    if (side === "top") return { x: 0, y: -len };
+    return { x: 0, y: len };
+  }
+  
+  function approachLen(vertex, neighbor, side) {
+    if (!vertex || !neighbor || !side) return -Infinity;
+    if (side === "left") return approx(vertex.y, neighbor.y) ? vertex.x - neighbor.x : -Infinity;
+    if (side === "right") return approx(vertex.y, neighbor.y) ? neighbor.x - vertex.x : -Infinity;
+    if (side === "top") return approx(vertex.x, neighbor.x) ? vertex.y - neighbor.y : -Infinity;
+    if (side === "bottom") return approx(vertex.x, neighbor.x) ? neighbor.y - vertex.y : -Infinity;
+    return -Infinity;
+  }
+  
+  function pointOnSegment(p, a, b) {
+    if (approx(a.y, b.y) && approx(p.y, a.y)) {
+      const lo = Math.min(a.x, b.x);
+      const hi = Math.max(a.x, b.x);
+      return p.x >= lo - 0.5 && p.x <= hi + 0.5;
+    }
+    if (approx(a.x, b.x) && approx(p.x, a.x)) {
+      const lo = Math.min(a.y, b.y);
+      const hi = Math.max(a.y, b.y);
+      return p.y >= lo - 0.5 && p.y <= hi + 0.5;
+    }
+    return false;
+  }
+  
+  function onAttachEdge(p, box, side) {
+    if (!p || !box || !side) return false;
+    if (side === "left") return approx(p.x, box.x);
+    if (side === "right") return approx(p.x, box.x + box.width);
+    if (side === "top") return approx(p.y, box.y);
+    return approx(p.y, box.y + box.height);
+  }
+  
+  function joinFromStub(stub, to, side) {
+    if (approx(stub.x, to.x) || approx(stub.y, to.y)) return [stub, to];
+    if (side === "left" || side === "right") return [stub, { x: stub.x, y: to.y }, to];
+    return [stub, { x: to.x, y: stub.y }, to];
+  }
+  
+  function joinToStub(from, stub, side) {
+    if (approx(from.x, stub.x) || approx(from.y, stub.y)) return [from, stub];
+    if (side === "left" || side === "right") return [from, { x: stub.x, y: from.y }, stub];
+    return [from, { x: from.x, y: stub.y }, stub];
+  }
+  
+  function ensureApproach(pts, atStart, side, minLen, box) {
+    if (!pts || pts.length < 2 || !side) return pts || [];
+    const vertex = atStart ? pts[0] : pts[pts.length - 1];
+    const neighbor = atStart ? pts[1] : pts[pts.length - 2];
+    const got = approachLen(vertex, neighbor, side);
+    if (got >= minLen - 0.5) return pts;
+    if (got > 0.5 && pts.length === 2) return pts;
+    const d = outwardDelta(side, minLen);
+    const stub = { x: vertex.x + d.x, y: vertex.y + d.y };
+    function keep(p) {
+      if (pointOnSegment(p, vertex, stub)) return false;
+      if (onAttachEdge(p, box, side)) return false;
+      return true;
+    }
+    if (atStart) {
+      const rest = pts.slice(1).filter(keep);
+      if (!rest.length) return simplify([vertex, stub]);
+      return simplify([vertex].concat(joinFromStub(stub, rest[0], side), rest.slice(1)));
+    }
+    const rest = pts.slice(0, -1).filter(keep);
+    if (!rest.length) return simplify([stub, vertex]);
+    return simplify(rest.slice(0, -1).concat(joinToStub(rest[rest.length - 1], stub, side), [vertex]));
+  }
+  
+  function padSide(box, side) {
+    if (!box || !side) return false;
+    if (isDiamond(box)) return true;
+    return side === "left" || side === "right";
+  }
+  
+  function padApproaches(route) {
+    const minLen = LAYOUT.minJog;
+    let pts = route.points;
+    if (!pts || pts.length < 2) return;
+    if (padSide(route.source, route.dir1)) {
+      pts = ensureApproach(pts, true, route.dir1, minLen, route.source);
+    }
+    if (padSide(route.target, route.dir2)) {
+      pts = ensureApproach(pts, false, route.dir2, minLen, route.target);
+    }
+    route.points = pts;
   }
   
   function sideFromPoint(box, pt) {
@@ -2757,7 +3781,7 @@
     return "bottom";
   }
   
-  function applyTracks(routes) {
+  function applyTracks(routes, boxes) {
     const hBuckets = Object.create(null);
     const vBuckets = Object.create(null);
     routes.forEach(function (route, ri) {
@@ -2814,75 +3838,184 @@
       }
       out[0] = { x: src[0].x, y: src[0].y };
       out[out.length - 1] = { x: src[src.length - 1].x, y: src[src.length - 1].y };
-      route.points = simplify(out);
+      const shifted = simplify(out);
+      if (
+        boxes &&
+        pathHitsBoxes(shifted, boxes, route.source, route.target)
+      ) {
+        return;
+      }
+      route.points = shifted;
     });
   }
   
-  const ALL_SIDES = ["right", "left", "bottom", "top"];
+  function facingPair(source, target) {
+    const sx = source.x + source.width / 2;
+    const sy = source.y + source.height / 2;
+    const tx = target.x + target.width / 2;
+    const ty = target.y + target.height / 2;
+    const h = [tx >= sx ? "right" : "left", tx >= sx ? "left" : "right"];
+    const v = [ty >= sy ? "bottom" : "top", ty >= sy ? "top" : "bottom"];
+    return { h: h, v: v };
+  }
+  
+  function sidePairsFor(source, target) {
+    if (source === target) {
+      return [
+        ["right", "right"],
+        ["left", "left"],
+        ["bottom", "bottom"],
+        ["top", "top"]
+      ];
+    }
+    const pref = preferSides(source, target);
+    const face = facingPair(source, target);
+    const seen = Object.create(null);
+    const pairs = [];
+    function add(a, b) {
+      const k = a + ":" + b;
+      if (seen[k]) return;
+      seen[k] = true;
+      pairs.push([a, b]);
+    }
+    add(pref[0], pref[1]);
+    add(face.h[0], face.h[1]);
+    add(face.v[0], face.v[1]);
+    add("right", "right");
+    add("left", "left");
+    return pairs;
+  }
+  
+  function sidePenalty(pair, pref) {
+    if (pair[0] === pref[0] && pair[1] === pref[1]) return 0;
+    const facing =
+      (pair[0] === "right" && pair[1] === "left") ||
+      (pair[0] === "left" && pair[1] === "right") ||
+      (pair[0] === "bottom" && pair[1] === "top") ||
+      (pair[0] === "top" && pair[1] === "bottom");
+    if (facing) return 40000;
+    return 180000;
+  }
   
   function routeWires(boxes, buses, origin, grid) {
-    const obstacles = (boxes || []).filter(function (b) {
-      return b && !b.empty && !b.textOnly;
+    const all = (boxes || []).filter(function (b) {
+      return b && !b.empty && !b.gap;
     });
-    const channels = mergeChannels(gridChannels(grid, origin), geometryChannels(obstacles, origin));
+    const channels = routeChannels(boxes, origin, grid);
     const pairCount = Object.create(null);
+    const usage = Object.create(null);
+    const usedPorts = Object.create(null);
     const routes = [];
   
     (buses || []).forEach(function (bus) {
       const sourceKey = bus.sourceId || bus.source;
       const targetKey = bus.targetId || bus.target;
-      const source = obstacles.find(function (m) {
+      const source = all.find(function (m) {
         return m.id === sourceKey || m.name === sourceKey;
       });
-      const target = obstacles.find(function (m) {
+      const target = all.find(function (m) {
         return m.id === targetKey || m.name === targetKey;
       });
       if (!source || !target) return;
+      const obstacles = routingObstacles(all, source, target);
       const pairKey = sourceKey + "\0" + targetKey;
       pairCount[pairKey] = (pairCount[pairKey] || 0) + 1;
       const n = pairCount[pairKey];
-      const t = n === 1 ? 0.5 : 0.35 + ((n - 1) % 5) * 0.1;
+      const t = n === 1 ? 0.5 : 0.32 + ((n - 1) % 5) * 0.09;
       const pref = preferSides(source, target);
-      const sidePairs = [[pref[0], pref[1]]];
-      ALL_SIDES.forEach(function (s1) {
-        ALL_SIDES.forEach(function (s2) {
-          if (s1 === pref[0] && s2 === pref[1]) return;
-          sidePairs.push([s1, s2]);
-        });
-      });
+      const diamondPairs = diamondSidePairs(source, target, bus);
+      const sidePairs = diamondPairs || sidePairsFor(source, target);
+      const attachT = source === target ? 0.3 : t;
+      const facingPorts =
+        portsOnSide(source, pref[0]).length > 0 || portsOnSide(target, pref[1]).length > 0;
   
       let best = null;
       let bestScore = Infinity;
-      sidePairs.forEach(function (pair) {
-        const p1 = edgePoint(source, pair[0], t);
-        const p2 = edgePoint(target, pair[1], 1 - t);
-        const pts = minTurnPath(p1, p2, obstacles, source, target, channels);
-        if (!pts) return;
-        const extra = pair[0] === pref[0] && pair[1] === pref[1] ? 0 : 500;
-        const score = scorePath(pts) + extra;
-        if (score < bestScore) {
-          bestScore = score;
-          best = { points: pts, dir1: pair[0], dir2: pair[1] };
-        }
-      });
+      let bestSrcPort = null;
+      let bestDstPort = null;
+      const straight = !facingPorts && alignedStraight(source, target, t);
+      const straightOk =
+        !diamondPairs &&
+        straight &&
+        !pathHitsBoxes(straight.points, obstacles, source, target);
+      if (straightOk) {
+        best = straight;
+        bestScore = scorePath(straight.points, usage);
+      }
+      if (!best || pathTurns(best.points) > 0) {
+        sidePairs.forEach(function (pair) {
+          if (isDiamond(source) && pair[0] === "top") return;
+          if (isDiamond(target) && pair[1] !== "top") return;
+          const srcPort = choosePort(source, pair[0], bus.sourcePort, usedPorts, bus.wide);
+          const dstPort = choosePort(target, pair[1], bus.targetPort, usedPorts, bus.wide);
+          const p1 = attachFromChoice(
+            source,
+            pair[0],
+            srcPort,
+            source === target ? 0.3 : attachT,
+            dstPort && !srcPort ? dstPort.y : null
+          );
+          const p2 = attachFromChoice(
+            target,
+            pair[1],
+            dstPort,
+            source === target ? 0.7 : t,
+            srcPort && !dstPort ? srcPort.y : null
+          );
+          let pts = null;
+          if (approx(p1.x, p2.x) || approx(p1.y, p2.y)) {
+            const direct = [p1, p2];
+            if (!pathHitsBoxes(direct, obstacles, source, target)) pts = direct;
+          }
+          if (!pts) pts = minTurnPath(p1, p2, obstacles, source, target, channels, usage);
+          if (!pts) return;
+          const score = scorePath(pts, usage) + (diamondPairs ? 0 : sidePenalty(pair, pref));
+          if (score < bestScore) {
+            bestScore = score;
+            best = { points: pts, dir1: pair[0], dir2: pair[1] };
+            bestSrcPort = srcPort;
+            bestDstPort = dstPort;
+          }
+        });
+      }
   
       if (!best) {
-        const p1 = edgePoint(source, pref[0], t);
-        const p2 = edgePoint(target, pref[1], 1 - t);
+        const fb = diamondForcedPair(source, target, bus) || pref;
+        const srcPort = choosePort(source, fb[0], bus.sourcePort, usedPorts, bus.wide);
+        const dstPort = choosePort(target, fb[1], bus.targetPort, usedPorts, bus.wide);
+        const p1 = attachFromChoice(source, fb[0], srcPort, t, dstPort && !srcPort ? dstPort.y : null);
+        const p2 = attachFromChoice(target, fb[1], dstPort, t, srcPort && !dstPort ? srcPort.y : null);
+        const x = source.x + source.width + LAYOUT.channelMin;
         best = {
-          points: [p1, { x: p1.x, y: p2.y }, p2],
-          dir1: pref[0],
-          dir2: pref[1]
+          points: simplify([p1, { x: x, y: p1.y }, { x: x, y: p2.y }, p2]),
+          dir1: fb[0],
+          dir2: fb[1]
         };
+        bestSrcPort = srcPort;
+        bestDstPort = dstPort;
         if (pathHitsBoxes(best.points, obstacles, source, target)) {
-          best.points = [p1, { x: p2.x, y: p1.y }, p2];
+          const x2 = source.x - LAYOUT.channelMin;
+          best.points = simplify([p1, { x: x2, y: p1.y }, { x: x2, y: p2.y }, p2]);
         }
       }
   
+      const polished = polishPath(best.points, obstacles, source, target);
+      const startSide = sideFromPoint(source, polished[0]);
+      const endSide = sideFromPoint(target, polished[polished.length - 1]);
+      if (!(isDiamond(source) && startSide === "top") && !(isDiamond(target) && endSide !== "top")) {
+        best.points = polished;
+        if (isDiamond(source)) best.dir1 = startSide;
+        if (isDiamond(target)) best.dir2 = endSide;
+      }
+      addUsage(best.points, usage);
+      markWired(source, bestSrcPort, usedPorts);
+      markWired(target, bestDstPort, usedPorts);
       const first = best.points[0];
       const last = best.points[best.points.length - 1];
       routes.push({
         bus: bus,
+        source: source,
+        target: target,
         x1: first.x,
         y1: first.y,
         x2: last.x,
@@ -2893,13 +4026,17 @@
       });
     });
   
-    applyTracks(routes);
+    applyTracks(routes, all);
+    collapseStraight(routes, all);
     routes.forEach(function (route) {
+      padApproaches(route);
       const pts = route.points;
       route.x1 = pts[0].x;
       route.y1 = pts[0].y;
       route.x2 = pts[pts.length - 1].x;
       route.y2 = pts[pts.length - 1].y;
+      route.dir1 = route.dir1 || sideFromPoint(route.source, pts[0]);
+      route.dir2 = route.dir2 || sideFromPoint(route.target, pts[pts.length - 1]);
     });
     return routes;
   }
@@ -2934,7 +4071,7 @@
       const pref = preferSides(source, target);
       const a = pinPoint(source, edge.sourcePin, pref[0]);
       const b = pinPoint(target, edge.targetPin, pref[1]);
-      let points = minTurnPath(a, b, obstacles, source, target, channels);
+      let points = minTurnPath(a, b, obstacles, source, target, channels, Object.create(null));
       if (!points) {
         points = approx(a.x, b.x) || approx(a.y, b.y) ? [a, b] : [a, { x: a.x, y: b.y }, b];
         if (pathHitsBoxes(points, obstacles, source, target)) {
@@ -2957,7 +4094,8 @@
         edge: edge
       });
     });
-    applyTracks(routes);
+    applyTracks(routes, obstacles);
+    collapseStraight(routes, obstacles);
     routes.forEach(function (route) {
       const pts = route.points;
       route.x1 = pts[0].x;
@@ -3187,7 +4325,8 @@
       maxBottom = Math.max(maxBottom, item.y + item.height + 8);
     });
   
-    const laidBuses = routeWires(placed, buses, { x: LAYOUT.pagePad, y: LAYOUT.pagePad }, placedInner);
+    const origin = { x: LAYOUT.pagePad, y: LAYOUT.pagePad };
+    const laidBuses = routeWires(placed, buses, origin, placedInner);
     laidBuses.forEach(function (item) {
       (item.points || []).forEach(function (pt) {
         maxRight = Math.max(maxRight, pt.x + 8);
@@ -3200,6 +4339,7 @@
       height: Math.max(maxBottom + LAYOUT.pagePad, 140),
       modules: placed,
       buses: laidBuses,
+      grid: { levels: collectGridLevels(rootBoxes, placedInner, origin) },
       empty: false,
       kind: "block"
     };
@@ -3239,17 +4379,7 @@
         loc: stmt.loc
       });
       edges.push({ source: fromId, target: id, name: "", direction: "forward" });
-      const tEnd = expand(stmt.consequent, id, nodes, edges, prefix + "/t");
-      if (tEnd === id) {
-        /* no consequent nodes */
-      } else {
-        const tEdge = edges.filter(function (e) {
-          return e.source === id && e.target !== (stmt.alternate && id);
-        });
-        tEdge.forEach(function (e) {
-          if (e.source === id && !e.goto) e.name = e.name || "1";
-        });
-      }
+      expand(stmt.consequent, id, nodes, edges, prefix + "/t");
       (edges || []).forEach(function (e) {
         if (e.source === id && !e.name) e.name = "1";
       });
@@ -3267,9 +4397,7 @@
   
   function measureNode(node) {
     if (node.kind === "diamond") {
-      const labelW = textWidth(node.name, 11) + 24;
-      const s = Math.max(LAYOUT.diamond, labelW * 0.7);
-      return { width: s, height: s, leftExtent: 0, rightExtent: 0 };
+      return diamondBoxSize(node.name);
     }
     if (node.kind === "cond") {
       const w = Math.max(LAYOUT.condW, textWidth(node.name, 11) + 20);
@@ -3309,88 +4437,179 @@
     };
   }
   
+  function emptyCell() {
+    return {
+      empty: true,
+      name: "",
+      id: "",
+      width: 0,
+      height: 0,
+      leftExtent: 0,
+      rightExtent: 0,
+      left: emptySide(),
+      right: emptySide(),
+      childBoxes: [],
+      innerPad: 0,
+      headerH: 0,
+      nested: false
+    };
+  }
+  
+  function gapBox(item) {
+    const size = item && item.size ? item.size : 1;
+    return {
+      empty: true,
+      gap: true,
+      name: "",
+      width: 0,
+      height: size * LAYOUT.gapUnit,
+      leftExtent: 0,
+      rightExtent: 0,
+      left: emptySide(),
+      right: emptySide(),
+      childBoxes: [],
+      innerPad: 0,
+      headerH: 0,
+      nested: false
+    };
+  }
+  
+  function stateNameOf(cell) {
+    if (!cell) return null;
+    if (cell.type === "state" || cell.type === "con") return cell.name;
+    if (cell.type === "instance") return cell.instName;
+    return null;
+  }
+  
+  function chainForCon(con) {
+    const nodes = [
+      {
+        id: con.name,
+        kind: "diamond",
+        name: con.cond || con.name,
+        loc: con.loc
+      }
+    ];
+    const edges = [];
+    if (con.whenTrue) {
+      edges.push({ source: con.name, target: con.whenTrue, name: "1", direction: "forward" });
+    }
+    if (con.whenFalse) {
+      edges.push({ source: con.name, target: con.whenFalse, name: "0", direction: "forward" });
+    }
+    return { nodes: nodes, edges: edges };
+  }
+  
+  function chainForState(st) {
+    const assigns = [];
+    const rest = [];
+    (st.body || []).forEach(function (stmt) {
+      if (stmt.type === "assign") assigns.push(stmt.dest + (stmt.blocking ? " = " : " <= ") + stmt.expr);
+      else rest.push(stmt);
+    });
+    const nodes = [{ id: st.name, kind: "state", name: st.name, assigns: assigns, loc: st.loc }];
+    const edges = [];
+    let cur = st.name;
+    rest.forEach(function (stmt, i) {
+      cur = expand(stmt, cur, nodes, edges, st.name + "/" + i);
+    });
+    return { nodes: nodes, edges: edges };
+  }
+  
+  function defaultRows(states) {
+    return (states || []).map(function (st) {
+      return [{ type: "state", name: st.name, loc: st.loc }];
+    });
+  }
+  
   function layoutAsm(ast) {
     const top = ast.modules && ast.modules[0];
     const states = (top && top.states) || ast.states || [];
+    const cons = (top && top.cons) || ast.cons || [];
     if (!states.length) {
       return { width: 420, height: 140, modules: [], buses: [], empty: true, kind: "asm" };
     }
-    const nodes = [];
+  
+    const chains = Object.create(null);
     const edges = [];
     states.forEach(function (st) {
-      const assigns = [];
-      const rest = [];
-      (st.body || []).forEach(function (stmt) {
-        if (stmt.type === "assign") assigns.push(stmt.dest + (stmt.blocking ? " = " : " <= ") + stmt.expr);
-        else rest.push(stmt);
+      const chain = chainForState(st);
+      chains[st.name] = chain;
+      (chain.edges || []).forEach(function (e) {
+        edges.push(e);
       });
-      nodes.push({ id: st.name, kind: "state", name: st.name, assigns: assigns, loc: st.loc });
-      let cur = st.name;
-      rest.forEach(function (stmt, i) {
-        cur = expand(stmt, cur, nodes, edges, st.name + "/" + i);
+    });
+    cons.forEach(function (con) {
+      const chain = chainForCon(con);
+      chains[con.name] = chain;
+      (chain.edges || []).forEach(function (e) {
+        edges.push(e);
       });
     });
   
-    const byId = Object.create(null);
-    const boxes = [];
-    nodes.forEach(function (node) {
-      const size = measureNode(node);
-      const box = makeBox(node, size);
-      byId[node.id] = box;
-      boxes.push(box);
-    });
-  
-    const stateOrder = states.map(function (st) {
-      return st.name;
-    });
-    const columns = stateOrder.map(function (name) {
-      const col = [byId[name]];
-      nodes.forEach(function (node) {
-        if (node.kind !== "state" && String(node.id).indexOf(name + "/") === 0) col.push(byId[node.id]);
+    const layoutRows = (ast.asmRows && ast.asmRows.length ? ast.asmRows : null) || defaultRows(states);
+    const gridRows = [];
+    layoutRows.forEach(function (row) {
+      const cells = row || [];
+      const gapRow = cells.some(function (cell) {
+        return cell && cell.type === "gap";
       });
-      return col;
-    });
-  
-    const colW = columns.map(function (col) {
-      return col.reduce(function (m, b) {
-        return Math.max(m, b.width);
+      if (gapRow) {
+        gridRows.push(
+          cells.map(function (cell) {
+            return cell && cell.type === "gap" ? gapBox(cell) : emptyCell();
+          })
+        );
+        return;
+      }
+      const stacks = cells.map(function (cell) {
+        const name = stateNameOf(cell);
+        if (name && chains[name]) return chains[name].nodes;
+        if (cell && cell.type === "text") return [{ id: "text/" + (cell.text || ""), kind: "cond", name: cell.text, loc: cell.loc }];
+        return [];
+      });
+      const depth = stacks.reduce(function (m, nodes) {
+        return Math.max(m, nodes.length || 0);
       }, 0);
+      if (!depth) {
+        gridRows.push([emptyCell()]);
+        return;
+      }
+      for (let d = 0; d < depth; d += 1) {
+        gridRows.push(
+          stacks.map(function (nodes) {
+            const node = nodes[d];
+            if (!node) return emptyCell();
+            return makeBox(node, measureNode(node));
+          })
+        );
+      }
     });
-    const gapX = LAYOUT.channelMin * 2;
-    const gapY = LAYOUT.channelMin;
-    const groupGap = LAYOUT.channelMin * 2;
-    const flow = ast.flow || "down";
-    const horizontal = flow === "right" || flow === "left";
-    if (horizontal) {
-      let x = LAYOUT.pagePad;
-      const ordered = flow === "left" ? columns.slice().reverse() : columns;
-      const orderedW = flow === "left" ? colW.slice().reverse() : colW;
-      ordered.forEach(function (col, ci) {
-        let y = LAYOUT.pagePad;
-        col.forEach(function (box) {
-          box.x = x + (orderedW[ci] - box.width) / 2;
-          box.y = y;
-          y += box.height + gapY;
-        });
-        x += orderedW[ci] + gapX;
-      });
-    } else {
-      const maxW = colW.reduce(function (m, w) {
-        return Math.max(m, w);
-      }, 0);
-      let y = LAYOUT.pagePad;
-      columns.forEach(function (col) {
-        col.forEach(function (box) {
-          box.x = LAYOUT.pagePad + (maxW - box.width) / 2;
-          box.y = y;
-          y += box.height + gapY;
-        });
-        y += groupGap - gapY;
-      });
-    }
   
-    boxes.forEach(function (box) {
-      attachPorts(box, box.x, box.y);
+    const placedInner = layoutCells(gridRows, {
+      route: true,
+      center: true,
+      channelMin: Math.max(LAYOUT.channelMin, 52)
+    });
+  
+    const rootBoxes = [];
+    gridRows.forEach(function (row) {
+      row.forEach(function (box) {
+        if (box && !box.empty) rootBoxes.push(box);
+      });
+    });
+    rootBoxes.forEach(function (box) {
+      attachPorts(box, LAYOUT.pagePad + (box.relX || 0), LAYOUT.pagePad + (box.relY || 0));
+      if (box.cell) {
+        box.cellAbs = {
+          x: box.x - (box.relX || 0) + box.cell.x,
+          y: box.y - (box.relY || 0) + box.cell.y,
+          w: box.cell.w,
+          h: box.cell.h,
+          row: box.cell.row,
+          col: box.cell.col
+        };
+      }
     });
   
     const busLike = edges.map(function (e) {
@@ -3404,26 +4623,32 @@
         targetId: e.target
       };
     });
-    const laidBuses = routeWires(boxes, busLike, { x: LAYOUT.pagePad, y: LAYOUT.pagePad }, null);
+    (ast.buses || []).forEach(function (bus) {
+      busLike.push(bus);
+    });
+  
+    const origin = { x: LAYOUT.pagePad, y: LAYOUT.pagePad };
+    const laidBuses = routeWires(rootBoxes, busLike, origin, placedInner);
   
     let maxRight = 0;
     let maxBottom = 0;
-    boxes.forEach(function (b) {
+    rootBoxes.forEach(function (b) {
       maxRight = Math.max(maxRight, b.x + b.width);
       maxBottom = Math.max(maxBottom, b.y + b.height);
     });
     laidBuses.forEach(function (item) {
       (item.points || []).forEach(function (pt) {
-        maxRight = Math.max(maxRight, pt.x + 8);
-        maxBottom = Math.max(maxBottom, pt.y + 8);
+        maxRight = Math.max(maxRight, pt.x + 12);
+        maxBottom = Math.max(maxBottom, pt.y + 12);
       });
     });
   
     return {
-      width: Math.max(maxRight + LAYOUT.pagePad, 320),
+      width: Math.max(maxRight + LAYOUT.pagePad, placedInner.width + LAYOUT.pagePad * 2, 320),
       height: Math.max(maxBottom + LAYOUT.pagePad, 140),
-      modules: flattenBoxes(boxes, []),
+      modules: flattenBoxes(rootBoxes, []),
       buses: laidBuses,
+      grid: { levels: collectGridLevels(rootBoxes, placedInner, origin) },
       empty: false,
       kind: "asm",
       reset: ast.reset || states[0].name
@@ -3813,11 +5038,13 @@
       });
     });
   
+    const lines = routeChannels(boxes, { x: LAYOUT.pagePad, y: LAYOUT.pagePad }, null);
     return {
       width: Math.max(maxRight + LAYOUT.pagePad, 320),
       height: Math.max(maxBottom + LAYOUT.pagePad, 140),
       modules: flattenBoxes(boxes, []),
       buses: routes,
+      grid: { levels: [{ depth: 0, clip: null, cells: [], xs: lines.xs, ys: lines.ys }] },
       empty: false,
       kind: "circuit",
       junctions: junctions
@@ -3831,6 +5058,100 @@
         return p[0] + "," + p[1];
       })
       .join(" ");
+  }
+  
+  function unitVec(a, b) {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.hypot(dx, dy) || 1;
+    return { x: dx / len, y: dy / len };
+  }
+  
+  function perpVec(d) {
+    return { x: -d.y, y: d.x };
+  }
+  
+  // Offset an orthogonal polyline by h along its left normal. Interior vertices
+  // are always turns (collinear points are pre-simplified), so the offset corner
+  // is simply the sum of the two adjacent segment normals — an exact miter for
+  // right-angle bends.
+  function offsetPolyline(pts, h) {
+    const out = [];
+    for (let i = 0; i < pts.length; i += 1) {
+      let ox = 0;
+      let oy = 0;
+      if (i > 0) {
+        const p = perpVec(unitVec(pts[i - 1], pts[i]));
+        ox += p.x;
+        oy += p.y;
+      }
+      if (i < pts.length - 1) {
+        const p = perpVec(unitVec(pts[i], pts[i + 1]));
+        ox += p.x;
+        oy += p.y;
+      }
+      out.push({ x: pts[i].x + ox * h, y: pts[i].y + oy * h });
+    }
+    return out;
+  }
+  
+  // A hollow draw.io-style block arrow that follows an orthogonal route: a
+  // constant-width shaft (two offset rails) capped by a chevron arrowhead at the
+  // target end, and optionally at the source end for bidirectional buses.
+  function busRibbonPath(points, opts) {
+    const pts = points || [];
+    if (pts.length < 2) return "";
+    const o = opts || {};
+    const half = o.half == null ? 5 : o.half;
+    const headHalf = o.headHalf == null ? 11 : o.headHalf;
+    const headLen = o.headLen == null ? 13 : o.headLen;
+    const both = !!o.both;
+    const n = pts.length;
+    const clampFactor = both && n === 2 ? 0.42 : 0.9;
+  
+    const left = offsetPolyline(pts, half);
+    const right = offsetPolyline(pts, -half);
+  
+    const uLast = unitVec(pts[n - 2], pts[n - 1]);
+    const segEnd = Math.abs(pts[n - 1].x - pts[n - 2].x) + Math.abs(pts[n - 1].y - pts[n - 2].y);
+    const hlEnd = Math.min(headLen, Math.max(2, segEnd * clampFactor));
+    const tipEnd = pts[n - 1];
+    const baseEnd = { x: tipEnd.x - uLast.x * hlEnd, y: tipEnd.y - uLast.y * hlEnd };
+    const pEnd = perpVec(uLast);
+    const leftBaseEnd = { x: baseEnd.x + pEnd.x * half, y: baseEnd.y + pEnd.y * half };
+    const rightBaseEnd = { x: baseEnd.x - pEnd.x * half, y: baseEnd.y - pEnd.y * half };
+    const leftHeadEnd = { x: baseEnd.x + pEnd.x * headHalf, y: baseEnd.y + pEnd.y * headHalf };
+    const rightHeadEnd = { x: baseEnd.x - pEnd.x * headHalf, y: baseEnd.y - pEnd.y * headHalf };
+  
+    const outline = [];
+    if (both) {
+      const uFirst = unitVec(pts[0], pts[1]);
+      const segStart = Math.abs(pts[1].x - pts[0].x) + Math.abs(pts[1].y - pts[0].y);
+      const hlStart = Math.min(headLen, Math.max(2, segStart * clampFactor));
+      const tip0 = pts[0];
+      const base0 = { x: tip0.x + uFirst.x * hlStart, y: tip0.y + uFirst.y * hlStart };
+      const p0 = perpVec(uFirst);
+      outline.push(tip0);
+      outline.push({ x: base0.x + p0.x * headHalf, y: base0.y + p0.y * headHalf });
+      outline.push({ x: base0.x + p0.x * half, y: base0.y + p0.y * half });
+      for (let i = 1; i < n - 1; i += 1) outline.push(left[i]);
+      outline.push(leftBaseEnd, leftHeadEnd, tipEnd, rightHeadEnd, rightBaseEnd);
+      for (let i = n - 2; i >= 1; i -= 1) outline.push(right[i]);
+      outline.push({ x: base0.x - p0.x * half, y: base0.y - p0.y * half });
+      outline.push({ x: base0.x - p0.x * headHalf, y: base0.y - p0.y * headHalf });
+    } else {
+      outline.push(left[0]);
+      for (let i = 1; i < n - 1; i += 1) outline.push(left[i]);
+      outline.push(leftBaseEnd, leftHeadEnd, tipEnd, rightHeadEnd, rightBaseEnd);
+      for (let i = n - 2; i >= 1; i -= 1) outline.push(right[i]);
+      outline.push(right[0]);
+    }
+  
+    let d = "M " + round(outline[0].x) + " " + round(outline[0].y);
+    for (let i = 1; i < outline.length; i += 1) {
+      d += " L " + round(outline[i].x) + " " + round(outline[i].y);
+    }
+    return d + " Z";
   }
   
   function triangle(x, y, pointing, size) {
@@ -3866,9 +5187,9 @@
   }
   
   function diamondPath(x, y, w, h) {
-    const cx = x + w / 2;
-    const cy = y + h / 2;
-    return ["M", cx, y, "L", x + w, cy, "L", cx, y + h, "L", x, cy, "Z"].join(" ");
+    const cx = round(x + w / 2);
+    const cy = round(y + h / 2);
+    return ["M", cx, round(y), "L", round(x + w), cy, "L", cx, round(y + h), "L", round(x), cy, "Z"].join(" ");
   }
   
   function roundedRect(x, y, w, h, r) {
@@ -3945,28 +5266,37 @@
   function svgStyle() {
     return [
       "<style>",
-      ".blockio-diagram{color:#6b8299;font-family:Courier,'Courier New',monospace}",
-      ".blockio-module{fill:var(--blockio-module-fill,#111b26);stroke:var(--blockio-line,currentColor);stroke-width:1.75}",
-      ".blockio-title{fill:var(--blockio-ink,#dbe7f3);font-size:13px;font-weight:700;font-family:Courier,'Courier New',monospace}",
-      ".blockio-port{fill:var(--blockio-ink,#dbe7f3);font-size:12px;font-family:Courier,'Courier New',monospace}",
-      ".blockio-width{fill:var(--blockio-muted,#91a4b7);font-size:9px;font-family:Courier,'Courier New',monospace}",
-      ".blockio-pin{stroke:var(--blockio-line,currentColor);stroke-width:1.5;fill:none;stroke-linecap:round}",
-      ".blockio-slash{stroke:var(--blockio-ink,#dbe7f3);stroke-width:1.5;fill:none;stroke-linecap:round}",
-      ".blockio-arrow{fill:var(--blockio-ink,#dbe7f3);stroke:none}",
-      ".blockio-inout{fill:none;stroke:var(--blockio-line,currentColor);stroke-width:1.5}",
-      ".blockio-group{fill:none;stroke:var(--blockio-accent,#4cc2ff);stroke-width:1.6}",
-      ".blockio-group-label{fill:var(--blockio-muted,#91a4b7);font-size:10px;font-weight:700;font-family:Courier,'Courier New',monospace}",
-      ".blockio-bus{fill:none;stroke:var(--blockio-accent,#4cc2ff);stroke-width:2.25;stroke-linecap:round;stroke-linejoin:round}",
-      ".blockio-bus-wide{stroke-width:14}",
-      ".blockio-bus-label-bg{fill:var(--blockio-module-fill,#111b26);stroke:var(--blockio-accent,#4cc2ff);stroke-width:1.2}",
-      ".blockio-bus-label{fill:var(--blockio-ink,#dbe7f3);font-size:11px;font-weight:700;font-family:Courier,'Courier New',monospace}",
-      ".blockio-note{fill:var(--blockio-ink,#dbe7f3);font-size:11px;font-family:Courier,'Courier New',monospace}",
-      ".blockio-diamond{fill:var(--blockio-module-fill,#111b26);stroke:var(--blockio-accent,#4cc2ff);stroke-width:1.75}",
-      ".blockio-cond{fill:var(--blockio-module-fill,#111b26);stroke:var(--blockio-accent,#4cc2ff);stroke-width:1.6}",
-      ".blockio-gate{fill:var(--blockio-module-fill,#111b26);stroke:var(--blockio-line,currentColor);stroke-width:1.75;fill-rule:evenodd}",
-      ".blockio-bubble{fill:var(--blockio-module-fill,#111b26);stroke:var(--blockio-line,currentColor);stroke-width:1.5}",
-      ".blockio-junction{fill:var(--blockio-accent,#4cc2ff);stroke:none}",
-      ".blockio-port-term{fill:var(--blockio-ink,#dbe7f3);font-size:11px;font-family:Courier,'Courier New',monospace}",
+      ".blockio-diagram{color:#d8dde3;font-family:'Courier New',Courier,monospace}",
+      ".blockio-module{fill:var(--blockio-module-fill,#000000);stroke:var(--blockio-line,#ffffff);stroke-width:1.25}",
+      ".blockio-module-nested{fill:var(--blockio-nested-fill,#1a2433)}",
+      ".blockio-module-leaf{fill:var(--blockio-module-fill,#000000)}",
+      ".blockio-title{fill:var(--blockio-ink,#ffffff);font-size:13px;font-weight:700;font-family:'Courier New',Courier,monospace}",
+      ".blockio-port{fill:var(--blockio-ink,#ffffff);font-size:12px;font-family:'Courier New',Courier,monospace}",
+      ".blockio-width{fill:var(--blockio-muted,#c5ccd4);font-size:9px;font-family:'Courier New',Courier,monospace}",
+      ".blockio-pin{stroke:var(--blockio-wire,#ffffff);stroke-width:1.25;fill:none;stroke-linecap:butt}",
+      ".blockio-slash{stroke:var(--blockio-wire,#ffffff);stroke-width:1.25;fill:none;stroke-linecap:butt}",
+      ".blockio-arrow{fill:var(--blockio-wire,#ffffff);stroke:none}",
+      ".blockio-inout{fill:none;stroke:var(--blockio-wire,#ffffff);stroke-width:1.25}",
+      ".blockio-group{fill:none;stroke:var(--blockio-group,#7ec8e3);stroke-width:1.4}",
+      ".blockio-group-label{fill:var(--blockio-muted,#c5ccd4);font-size:10px;font-weight:700;font-family:'Courier New',Courier,monospace}",
+      ".blockio-bus{fill:none;stroke:var(--blockio-wire,#ffffff);stroke-width:1.25;stroke-linecap:butt;stroke-linejoin:miter}",
+      ".blockio-bus-wide{fill:var(--blockio-module-fill,#000000);stroke:var(--blockio-wire,#ffffff);stroke-width:1.25;stroke-linejoin:miter}",
+      ".blockio-bus-label-bg{fill:var(--blockio-module-fill,#000000);stroke:var(--blockio-wire,#ffffff);stroke-width:1.15}",
+      ".blockio-bus-label{fill:var(--blockio-ink,#ffffff);font-size:11px;font-weight:700;font-family:'Courier New',Courier,monospace}",
+      ".blockio-note{fill:var(--blockio-ink,#ffffff);font-size:11px;font-family:'Courier New',Courier,monospace}",
+      ".blockio-state-name{fill:var(--blockio-ink,#ffffff);font-size:13px;font-weight:700;font-family:'Courier New',Courier,monospace}",
+      ".blockio-diamond{fill:var(--blockio-module-fill,#000000);stroke:var(--blockio-line,#ffffff);stroke-width:1.25}",
+      ".blockio-diamond-label{fill:var(--blockio-ink,#ffffff);font-size:9px;font-weight:700;font-family:'Courier New',Courier,monospace}",
+      ".blockio-cond{fill:var(--blockio-module-fill,#000000);stroke:var(--blockio-line,#ffffff);stroke-width:1.25}",
+      ".blockio-gate{fill:var(--blockio-module-fill,#000000);stroke:var(--blockio-line,#ffffff);stroke-width:1.25;fill-rule:evenodd}",
+      ".blockio-reg{fill:var(--blockio-nested-fill,#1a2433);stroke:var(--blockio-line,#ffffff);stroke-width:1.25}",
+      ".blockio-bubble{fill:var(--blockio-module-fill,#000000);stroke:var(--blockio-line,#ffffff);stroke-width:1.25}",
+      ".blockio-junction{fill:var(--blockio-wire,#ffffff);stroke:none}",
+      ".blockio-port-term{fill:var(--blockio-ink,#ffffff);font-size:11px;font-family:'Courier New',Courier,monospace}",
+      ".blockio-grid{display:none}",
+      '.blockio-diagram[data-blockio-grid="on"] .blockio-grid{display:block}',
+      ".blockio-grid-line{stroke:var(--blockio-grid-line,#5a6a7a);stroke-width:0.7;opacity:0.55;fill:none}",
+      ".blockio-grid-line.blockio-grid-nested{stroke:var(--blockio-grid-nested,#7ec8e3);opacity:0.7}",
       "</style>"
     ].join("");
   }
@@ -3976,34 +5306,37 @@
     (ports || []).forEach(function (item) {
       const atLeft = side === "left";
       const edgeX = atLeft ? moduleBox.x : moduleBox.x + moduleBox.width;
+      const wired = !!item.wired;
       const endX = atLeft ? edgeX - LAYOUT.pinLen : edgeX + LAYOUT.pinLen;
       const y = item.y;
-      out.push(
-        '<line x1="' + round(edgeX) + '" y1="' + round(y) + '" x2="' + round(endX) + '" y2="' + round(y) + '" class="blockio-pin"/>'
-      );
-      const dir = item.port.direction;
-      const intoModule = dir === "input";
-      if (dir === "inout") {
-        const midX = (edgeX + endX) / 2;
+      if (!wired) {
         out.push(
-          '<polygon points="' +
-            pointsAttr([
-              [midX, y - 4],
-              [midX + 4, y],
-              [midX, y + 4],
-              [midX - 4, y]
-            ]) +
-            '" class="blockio-inout"/>'
+          '<line x1="' + round(edgeX) + '" y1="' + round(y) + '" x2="' + round(endX) + '" y2="' + round(y) + '" class="blockio-pin"/>'
         );
-      } else {
-        const tipX = intoModule ? edgeX : endX;
-        const pointing = intoModule ? (atLeft ? "right" : "left") : atLeft ? "left" : "right";
-        out.push(
-          '<polygon points="' + pointsAttr(triangle(tipX, y, pointing, 5)) + '" class="blockio-arrow"/>'
-        );
+        const dir = item.port.direction;
+        const intoModule = dir === "input";
+        if (dir === "inout") {
+          const midX = (edgeX + endX) / 2;
+          out.push(
+            '<polygon points="' +
+              pointsAttr([
+                [midX, y - 4],
+                [midX + 4, y],
+                [midX, y + 4],
+                [midX - 4, y]
+              ]) +
+              '" class="blockio-inout"/>'
+          );
+        } else {
+          const tipX = intoModule ? edgeX : endX;
+          const pointing = intoModule ? (atLeft ? "right" : "left") : atLeft ? "left" : "right";
+          out.push(
+            '<polygon points="' + pointsAttr(triangle(tipX, y, pointing, 5)) + '" class="blockio-arrow"/>'
+          );
+        }
       }
       if (item.port.width > 1) {
-        const slashX = (edgeX + endX) / 2;
+        const slashX = wired ? (atLeft ? edgeX - 16 : edgeX + 16) : (edgeX + endX) / 2;
         out.push(
           '<line x1="' +
             round(slashX - 5) +
@@ -4027,11 +5360,12 @@
       }
       const textX = atLeft ? endX - LAYOUT.labelGap : endX + LAYOUT.labelGap;
       const anchor = atLeft ? "end" : "start";
+      const textY = wired ? y - 10 : y + 4;
       out.push(
         '<text x="' +
           round(textX) +
           '" y="' +
-          round(y + 4) +
+          round(textY) +
           '" text-anchor="' +
           anchor +
           '" class="blockio-port">' +
@@ -4073,6 +5407,49 @@
     });
   }
   
+  function alongPath(pts, dist) {
+    let left = dist;
+    for (let i = 1; i < (pts || []).length; i += 1) {
+      const a = pts[i - 1];
+      const b = pts[i];
+      const len = Math.abs(b.x - a.x) + Math.abs(b.y - a.y);
+      if (len < 0.01) continue;
+      if (left <= len) {
+        const t = left / len;
+        return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, dx: b.x - a.x, dy: b.y - a.y };
+      }
+      left -= len;
+    }
+    const n = pts.length;
+    return { x: pts[n - 1].x, y: pts[n - 1].y, dx: 0, dy: 0 };
+  }
+  
+  function branchLabelPos(pts, item) {
+    const pad = LAYOUT.branchLabelPad || 26;
+    const hit = alongPath(pts, pad);
+    const side = item.dir1;
+    let ox = 0;
+    let oy = 0;
+    if (side === "bottom") {
+      ox = 12;
+      oy = 0;
+    } else if (side === "top") {
+      ox = 12;
+      oy = 0;
+    } else if (side === "left") {
+      ox = 0;
+      oy = -12;
+    } else if (side === "right") {
+      ox = 0;
+      oy = -12;
+    } else if (Math.abs(hit.dx) >= Math.abs(hit.dy)) {
+      oy = -12;
+    } else {
+      ox = 12;
+    }
+    return { x: hit.x + ox, y: hit.y + oy };
+  }
+  
   function renderWires(out, laid) {
     (laid.buses || []).forEach(function (item) {
       let pts = item.points;
@@ -4083,30 +5460,50 @@
         ];
       }
       const bus = item.bus || {};
-      out.push(
-        '<path d="' +
-          busPathFromPoints(pts) +
-          '" class="blockio-bus' +
-          (bus.wide ? " blockio-bus-wide" : "") +
-          '"/>'
-      );
-      out.push(
-        '<polygon points="' +
-          pointsAttr(triangle(item.x2, item.y2, intoPointing(item.dir2), 6)) +
-          '" class="blockio-arrow"/>'
-      );
-      if (bus.direction !== "forward") {
+      if (bus.wide) {
+        // Wide buses render as hollow draw.io block arrows (shaft + chevron heads).
+        out.push(
+          '<path d="' +
+            busRibbonPath(pts, {
+              half: 5,
+              headHalf: 11,
+              headLen: 13,
+              both: bus.direction === "bidirectional"
+            }) +
+            '" class="blockio-bus-wide"/>'
+        );
+      } else {
+        out.push('<path d="' + busPathFromPoints(pts) + '" class="blockio-bus"/>');
         out.push(
           '<polygon points="' +
-            pointsAttr(triangle(item.x1, item.y1, intoPointing(item.dir1), 6)) +
+            pointsAttr(triangle(item.x2, item.y2, intoPointing(item.dir2), 6)) +
             '" class="blockio-arrow"/>'
         );
+        if (bus.direction === "bidirectional") {
+          out.push(
+            '<polygon points="' +
+              pointsAttr(triangle(item.x1, item.y1, intoPointing(item.dir1), 6)) +
+              '" class="blockio-arrow"/>'
+          );
+        }
       }
       if (bus.name) {
-        const mid = pts[Math.floor(pts.length / 2)];
-        const prev = pts[Math.max(0, Math.floor(pts.length / 2) - 1)];
-        const lx = (prev.x + mid.x) / 2;
-        const ly = (prev.y + mid.y) / 2;
+        const branch = bus.name === "1" || bus.name === "0";
+        const pos =
+          branch && item.source && item.source.kind === "diamond"
+            ? branchLabelPos(pts, item)
+            : null;
+        let lx;
+        let ly;
+        if (pos) {
+          lx = pos.x;
+          ly = pos.y;
+        } else {
+          const mid = pts[Math.floor(pts.length / 2)];
+          const prev = pts[Math.max(0, Math.floor(pts.length / 2) - 1)];
+          lx = (prev.x + mid.x) / 2;
+          ly = (prev.y + mid.y) / 2;
+        }
         const tw = textWidth(bus.name, 11) + 16;
         const th = 18;
         out.push(
@@ -4118,7 +5515,7 @@
             round(tw) +
             '" height="' +
             round(th) +
-            '" rx="3" class="blockio-bus-label-bg"/>'
+            '" class="blockio-bus-label-bg"/>'
         );
         out.push(
           '<text x="' +
@@ -4133,9 +5530,89 @@
     });
   }
   
+  function idPrefixFor(options) {
+    const opts = options || {};
+    return String(opts.idPrefix || "blockio").replace(/[^A-Za-z0-9_-]/g, "") || "blockio";
+  }
+  
+  // Debug grid overlay. Draws the invisible routing grid as a hierarchy: one
+  // universal level for the top of the diagram, then a confined level per nested
+  // container (clipped to its own content area) so the levels never overlap. It is
+  // hidden by default via CSS and revealed by setting data-blockio-grid="on" on
+  // the <svg> root, so any host — standalone editor or embedded docs — can toggle
+  // it without re-rendering.
+  function renderGrid(out, laid, options) {
+    const grid = laid && laid.grid;
+    const levels = grid && grid.levels;
+    if (!levels || !levels.length) return;
+    const prefix = idPrefixFor(options);
+    out.push('<g class="blockio-grid" aria-hidden="true">');
+    levels.forEach(function (level, li) {
+      const nested = (level.depth || 0) > 0;
+      const clip = level.clip;
+      const gid = prefix + "-grid-" + li;
+      if (clip && clip.w > 0 && clip.h > 0) {
+        out.push(
+          '<clipPath id="' +
+            gid +
+            '"><rect x="' +
+            round(clip.x) +
+            '" y="' +
+            round(clip.y) +
+            '" width="' +
+            round(clip.w) +
+            '" height="' +
+            round(clip.h) +
+            '"/></clipPath>'
+        );
+        out.push('<g clip-path="url(#' + gid + ')">');
+      } else {
+        out.push("<g>");
+      }
+      const lineClass = "blockio-grid-line" + (nested ? " blockio-grid-nested" : "");
+      const x0 = clip ? clip.x : 0;
+      const x1 = clip ? clip.x + clip.w : laid.width;
+      const y0 = clip ? clip.y : 0;
+      const y1 = clip ? clip.y + clip.h : laid.height;
+      (level.xs || []).forEach(function (x) {
+        out.push(
+          '<line x1="' +
+            round(x) +
+            '" y1="' +
+            round(y0) +
+            '" x2="' +
+            round(x) +
+            '" y2="' +
+            round(y1) +
+            '" class="' +
+            lineClass +
+            '"/>'
+        );
+      });
+      (level.ys || []).forEach(function (y) {
+        out.push(
+          '<line x1="' +
+            round(x0) +
+            '" y1="' +
+            round(y) +
+            '" x2="' +
+            round(x1) +
+            '" y2="' +
+            round(y) +
+            '" class="' +
+            lineClass +
+            '"/>'
+        );
+      });
+      out.push("</g>");
+    });
+    out.push("</g>");
+  }
+  
   function openSvg(laid, ast, options, labelPrefix) {
     const opts = options || {};
-    const prefix = String(opts.idPrefix || "blockio").replace(/[^A-Za-z0-9_-]/g, "") || "blockio";
+    const prefix = idPrefixFor(options);
+    const gridOn = opts.grid === true || opts.grid === "on";
     let names = [];
     walkModules((ast && ast.modules) || [], function (mod) {
       names.push(mod.name);
@@ -4164,6 +5641,8 @@
         round(laid.width) +
         '" height="' +
         round(laid.height) +
+        '" data-blockio-grid="' +
+        (gridOn ? "on" : "off") +
         '" role="img" aria-label="' +
         escapeXml(label) +
         '">'
@@ -4197,7 +5676,9 @@
             round(item.width) +
             '" height="' +
             round(item.height) +
-            '" class="blockio-module"/>'
+            '" class="blockio-module' +
+            (item.nested ? " blockio-module-nested" : " blockio-module-leaf") +
+            '"/>'
         );
       }
       const titleY = item.textOnly
@@ -4227,6 +5708,7 @@
     });
   
     renderWires(out, laid);
+    renderGrid(out, laid, options);
     out.push("</svg>");
     return out.join("\n");
   }
@@ -4263,6 +5745,7 @@
   
     (laid.modules || []).forEach(function (item) {
       if (item.kind === "diamond") {
+        const fs = diamondFontSize(item.name, item.width, item.height);
         out.push(
           '<path d="' + diamondPath(item.x, item.y, item.width, item.height) + '" class="blockio-diamond"/>'
         );
@@ -4270,8 +5753,10 @@
           '<text x="' +
             round(item.x + item.width / 2) +
             '" y="' +
-            round(item.y + item.height / 2 + 4) +
-            '" text-anchor="middle" class="blockio-title">' +
+            round(item.y + item.height / 2 + fs * 0.35) +
+            '" text-anchor="middle" class="blockio-diamond-label" style="font-size:' +
+            fs +
+            'px">' +
             escapeXml(item.name) +
             "</text>"
         );
@@ -4279,7 +5764,15 @@
       }
       if (item.kind === "cond") {
         out.push(
-          '<path d="' + roundedRect(item.x, item.y, item.width, item.height, 10) + '" class="blockio-cond"/>'
+          '<rect x="' +
+            round(item.x) +
+            '" y="' +
+            round(item.y) +
+            '" width="' +
+            round(item.width) +
+            '" height="' +
+            round(item.height) +
+            '" class="blockio-cond"/>'
         );
         out.push(
           '<text x="' +
@@ -4301,23 +5794,27 @@
           round(item.width) +
           '" height="' +
           round(item.height) +
-          '" class="blockio-module"/>'
+          '" class="blockio-module blockio-module-leaf"/>'
       );
+      // State name sits at the top-left, just above the box (ASM chart convention).
       out.push(
         '<text x="' +
-          round(item.x + item.width / 2) +
+          round(item.x) +
           '" y="' +
-          round(item.y + 18) +
-          '" text-anchor="middle" class="blockio-title">' +
+          round(item.y - 6) +
+          '" text-anchor="start" class="blockio-state-name">' +
           escapeXml(item.name) +
           "</text>"
       );
-      (item.assigns || []).forEach(function (line, i) {
+      const assigns = item.assigns || [];
+      const step = 15;
+      const startY = round(item.y + item.height / 2 - ((assigns.length - 1) * step) / 2 + 4);
+      assigns.forEach(function (line, i) {
         out.push(
           '<text x="' +
             round(item.x + item.width / 2) +
             '" y="' +
-            round(item.y + 36 + i * 14) +
+            round(startY + i * step) +
             '" text-anchor="middle" class="blockio-note">' +
             escapeXml(line) +
             "</text>"
@@ -4326,6 +5823,7 @@
     });
   
     renderWires(out, laid);
+    renderGrid(out, laid, options);
     out.push("</svg>");
     return out.join("\n");
   }
@@ -4373,8 +5871,12 @@
         return;
       }
       const kind = item.gateKind || "and";
+      const gateClass =
+        kind === "dff" || kind === "dffr" || kind === "latch" || kind === "add"
+          ? "blockio-reg"
+          : "blockio-gate";
       out.push(
-        '<path d="' + gatePath(kind, item.x, item.y, item.width, item.height) + '" class="blockio-gate"/>'
+        '<path d="' + gatePath(kind, item.x, item.y, item.width, item.height) + '" class="' + gateClass + '"/>'
       );
       if (kind === "xor" || kind === "xnor") {
         out.push(
@@ -4431,6 +5933,7 @@
       );
     });
   
+    renderGrid(out, laid, options);
     out.push("</svg>");
     return out.join("\n");
   }
@@ -4462,33 +5965,33 @@
     }
   }
   
-  function emitStmt(stmt, pad) {
+  function emitStmt(stmt, pad, cons, seen) {
     if (!stmt) return "";
     if (stmt.type === "assign") {
       const op = stmt.blocking ? " = " : " <= ";
       return indent(pad) + stmt.dest + op + stmt.expr + ";\n";
     }
     if (stmt.type === "goto") {
-      return indent(pad) + "next_state = " + stmt.target + ";\n";
+      return emitTarget(stmt.target, pad, cons, seen || Object.create(null));
     }
     if (stmt.type === "block") {
       let out = "";
       (stmt.body || []).forEach(function (inner) {
-        out += emitStmt(inner, pad);
+        out += emitStmt(inner, pad, cons, seen);
       });
       return out;
     }
     if (stmt.type === "if") {
       let out = indent(pad) + "if (" + stmt.cond + ") begin\n";
-      out += emitStmt(stmt.consequent, pad + 1) || indent(pad + 1) + ";\n";
+      out += emitStmt(stmt.consequent, pad + 1, cons, seen) || indent(pad + 1) + ";\n";
       out += indent(pad) + "end";
       if (stmt.alternate) {
         if (stmt.alternate.type === "if") {
           out += " else ";
-          out += emitStmt(stmt.alternate, pad).replace(/^\s+/, "");
+          out += emitStmt(stmt.alternate, pad, cons, seen).replace(/^\s+/, "");
         } else {
           out += " else begin\n";
-          out += emitStmt(stmt.alternate, pad + 1);
+          out += emitStmt(stmt.alternate, pad + 1, cons, seen);
           out += indent(pad) + "end\n";
         }
       } else {
@@ -4497,6 +6000,22 @@
       return out;
     }
     return "";
+  }
+  
+  function emitTarget(name, pad, cons, seen) {
+    const table = cons || Object.create(null);
+    const used = seen || Object.create(null);
+    const con = table[name];
+    if (!con) return indent(pad) + "next_state = " + name + ";\n";
+    if (used[name]) return indent(pad) + "next_state = next_state;\n";
+    used[name] = true;
+    let out = indent(pad) + "if (" + con.cond + ") begin\n";
+    out += emitTarget(con.whenTrue, pad + 1, table, used);
+    out += indent(pad) + "end else begin\n";
+    out += emitTarget(con.whenFalse, pad + 1, table, used);
+    out += indent(pad) + "end\n";
+    used[name] = false;
+    return out;
   }
   
   function bitWidth(n) {
@@ -4595,7 +6114,7 @@
     return null;
   }
   
-  function inferPorts(states, declared) {
+  function inferPorts(states, declared, cons) {
     const byName = Object.create(null);
     (declared || []).forEach(function (port) {
       byName[port.name] = {
@@ -4608,6 +6127,9 @@
     const stateNames = Object.create(null);
     (states || []).forEach(function (st) {
       stateNames[st.name] = true;
+    });
+    (cons || []).forEach(function (con) {
+      if (con && con.name) stateNames[con.name] = true;
     });
     function ensure(name, dir, width) {
       if (!name || stateNames[name]) return;
@@ -4634,6 +6156,11 @@
     }
     (states || []).forEach(function (st) {
       (st.body || []).forEach(walk);
+    });
+    (cons || []).forEach(function (con) {
+      identList(con && con.cond).forEach(function (id) {
+        if (!byName[id] || byName[id].direction !== "output") ensure(id, "input", 1);
+      });
     });
     ensure("clk", "input", 1);
     ensure("rst_n", "input", 1);
@@ -4669,10 +6196,15 @@
     const top = ast.modules && ast.modules[0];
     const states = (top && top.states) || ast.states || [];
     if (!states.length) return { verilog: "", diagnostics: [] };
+    const cons = (top && top.cons) || ast.cons || [];
+    const consByName = Object.create(null);
+    cons.forEach(function (con) {
+      if (con && con.name) consByName[con.name] = con;
+    });
     const def = pickFsmDef(ast, states);
     const name = def && def.name ? def.name : "fsm";
     const declared = def ? flattenPortsList(def.left).concat(flattenPortsList(def.right)) : [];
-    const ports = inferPorts(states, declared);
+    const ports = inferPorts(states, declared, cons);
     const clkRst = findClkRst(ports);
     const n = states.length;
     const w = bitWidth(n);
@@ -4745,7 +6277,7 @@
       lines.push("      " + st.name + ": begin");
       (st.body || []).forEach(function (stmt) {
         if (stmt.type === "assign" && !stmt.blocking) return;
-        lines.push(emitStmt(stmt, 4).replace(/\s+$/, ""));
+        lines.push(emitStmt(stmt, 4, consByName).replace(/\s+$/, ""));
       });
       lines.push("      end");
     });
